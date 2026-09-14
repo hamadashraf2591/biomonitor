@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+scikit-learn
+numpy
+reportlab
+python-jose[cryptography]
+bcrypt
+python-multipart
