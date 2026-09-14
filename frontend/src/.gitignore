@@ -1,0 +1,15 @@
+# Python
+venv/
+ai_env/
+__pycache__/
+*.pyc
+.env
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Misc
+.DS_Store
+*.log
