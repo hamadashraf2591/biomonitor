@@ -1,198 +1,78 @@
-from fastapi import FastAPI, Depends, HTTPException
+import os
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
+from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel
+import uvicorn
+from app.ai_assistant import chat_with_ai, analyze_image_with_ai
+from app.pdf_report import generate_patient_pdf
 
-from .database import engine, Base, get_db
-from .models import Patient, Vital
-from .schemas import (
-    PatientCreate,
-    PatientResponse,
-    VitalCreate,
-    VitalResponse
-)
-from .anomaly import rule_based_check, ml_detect_anomalies
-from .pdf_report import generate_patient_pdf
-from .auth import authenticate_user, create_access_token, get_current_user
+app = FastAPI(title="BioMonitor API")
 
-Base.metadata.create_all(bind=engine)
-
-app = FastAPI(
-    title="BioMonitor API",
-    description="Real-Time Biomedical Patient Monitoring & Analytics Platform",
-    version="1.0.0"
-)
-
+# ✅ CORS - Sab URLs allow karo
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ReportRequest(BaseModel):
+    patient: dict
+    vitals: dict
+
+
 @app.get("/")
-def root():
-    return {"message": "BioMonitor API is running", "status": "online"}
+def home():
+    return {"message": "BioMonitor API is running"}
 
 
 @app.get("/health")
-def health_check():
+def health():
+    return {"status": "online", "system": "BioMonitor"}
+
+
+@app.post("/ai/chat")
+async def chat_endpoint(request: ChatRequest):
     try:
-        with engine.connect():
-            database_status = "connected"
-    except Exception:
-        database_status = "disconnected"
-    return {"status": "healthy", "database": database_status}
+        response = chat_with_ai(request.message)
+        return JSONResponse(content={"response": response, "status": "success"})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e), "status": "error"}, status_code=500)
 
 
-# ============================================
-# LOGIN / JWT (STEP 18)
-# ============================================
-
-@app.post("/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = authenticate_user(form_data.username, form_data.password)
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail="Incorrect username or password"
-        )
-    token = create_access_token(data={"sub": user["username"]})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "full_name": user["full_name"]
-    }
+@app.post("/ai/analyze-image")
+async def analyze_image_endpoint(file: UploadFile = File(...), message: str = ""):
+    try:
+        image_bytes = await file.read()
+        response = analyze_image_with_ai(image_bytes, message)
+        return JSONResponse(content={"response": response, "status": "success"})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e), "status": "error"}, status_code=500)
 
 
-@app.get("/me")
-def read_me(current_user: dict = Depends(get_current_user)):
-    return current_user
+@app.post("/api/download-report")
+async def download_report(request: ReportRequest):
+    try:
+        pdf_buffer = generate_patient_pdf(patient_data=request.patient, vitals_data=request.vitals)
+        filename = "Report_" + str(request.patient.get("name", "Patient")).replace(" ", "_") + ".pdf"
+        return StreamingResponse(iter([pdf_buffer.getvalue()]), media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=" + filename})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e), "status": "error"}, status_code=500)
 
 
-# ============================================
-# PATIENTS
-# ============================================
-
-@app.post("/patients", response_model=PatientResponse)
-def create_patient(patient: PatientCreate, db: Session = Depends(get_db)):
-    new_patient = Patient(
-        name=patient.name,
-        age=patient.age,
-        gender=patient.gender,
-        medical_condition=patient.medical_condition
-    )
-    db.add(new_patient)
-    db.commit()
-    db.refresh(new_patient)
-    return new_patient
+@app.get("/api/status")
+def api_status():
+    return {"api_status": "connected", "gemini_api": "active"}
 
 
-@app.get("/patients", response_model=list[PatientResponse])
-def get_patients(db: Session = Depends(get_db)):
-    return db.query(Patient).all()
-
-
-# ============================================
-# VITALS
-# ============================================
-
-@app.post("/vitals", response_model=VitalResponse)
-def create_vital(vital: VitalCreate, db: Session = Depends(get_db)):
-    patient = db.query(Patient).filter(Patient.id == vital.patient_id).first()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
-
-    new_vital = Vital(
-        patient_id=vital.patient_id,
-        heart_rate=vital.heart_rate,
-        temperature=vital.temperature,
-        oxygen_level=vital.oxygen_level,
-        systolic_bp=vital.systolic_bp,
-        diastolic_bp=vital.diastolic_bp
-    )
-    db.add(new_vital)
-    db.commit()
-    db.refresh(new_vital)
-    return new_vital
-
-
-@app.get("/vitals", response_model=list[VitalResponse])
-def get_vitals(db: Session = Depends(get_db)):
-    return db.query(Vital).all()
-
-
-# ============================================
-# ANOMALY DETECTION (STEP 16)
-# ============================================
-
-@app.get("/analyze/vital/{vital_id}")
-def analyze_single_vital(vital_id: int, db: Session = Depends(get_db)):
-    vital = db.query(Vital).filter(Vital.id == vital_id).first()
-    if not vital:
-        raise HTTPException(status_code=404, detail="Vital not found")
-    result = rule_based_check(vital)
-    result["vital_id"] = vital_id
-    result["patient_id"] = vital.patient_id
-    return result
-
-
-@app.get("/alerts")
-def get_alerts(db: Session = Depends(get_db)):
-    all_vitals = db.query(Vital).all()
-    ml_results = ml_detect_anomalies(all_vitals)
-    alerts = []
-
-    for vital in all_vitals:
-        rule_result = rule_based_check(vital)
-        ml_flag = ml_results.get(vital.id, False)
-
-        if rule_result["is_anomaly"] or ml_flag:
-            patient = db.query(Patient).filter(
-                Patient.id == vital.patient_id
-            ).first()
-
-            alerts.append({
-                "vital_id": vital.id,
-                "patient_id": vital.patient_id,
-                "patient_name": patient.name if patient else "Unknown",
-                "severity": rule_result["severity"],
-                "issues": rule_result["issues"],
-                "ml_anomaly": ml_flag,
-                "recorded_at": vital.recorded_at,
-                "vitals": {
-                    "heart_rate": vital.heart_rate,
-                    "temperature": vital.temperature,
-                    "oxygen_level": vital.oxygen_level,
-                    "systolic_bp": vital.systolic_bp,
-                    "diastolic_bp": vital.diastolic_bp,
-                }
-            })
-    return alerts
-
-
-# ============================================
-# PDF REPORT (STEP 17)
-# ============================================
-
-@app.get("/report/patient/{patient_id}")
-def download_patient_report(patient_id: int, db: Session = Depends(get_db)):
-    patient = db.query(Patient).filter(Patient.id == patient_id).first()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
-
-    vitals = db.query(Vital).filter(
-        Vital.patient_id == patient_id
-    ).order_by(Vital.recorded_at.desc()).all()
-
-    pdf_buffer = generate_patient_pdf(patient, vitals)
-    filename = f"patient_{patient_id}_report.pdf"
-
-    return StreamingResponse(
-        pdf_buffer,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 8001))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)

@@ -1,1330 +1,200 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-} from "recharts";
+import React, { useState, useEffect, useRef, useCallback, createContext, useContext } from "react";
+import AiAssistant from "./AiAssistant";
 import "./App.css";
-import Login from "./Login";
 
-const API_URL = "http://127.0.0.1:8001";
+const ThemeCtx = createContext();
+const useTheme = () => useContext(ThemeCtx);
+const ThemeProvider = ({ children }) => {
+  const [theme, setTheme] = useState(() => localStorage.getItem("bm_theme") || "dark");
+  useEffect(() => { localStorage.setItem("bm_theme", theme); document.body.setAttribute("data-theme", theme); }, [theme]);
+  return <ThemeCtx.Provider value={{ theme, toggle: () => setTheme(t => t === "dark" ? "light" : "dark") }}>{children}</ThemeCtx.Provider>;
+};
+
+const ToastCtx = createContext();
+const useToast = () => useContext(ToastCtx);
+const ToastProvider = ({ children }) => {
+  const [toasts, setToasts] = useState([]);
+  const addToast = (msg, type) => { const id = Date.now(); setToasts(p => [...p, { id, msg, type: type || "success" }]); setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 4000); };
+  return <ToastCtx.Provider value={{ addToast }}>{children}<div className="toast-container">{toasts.map(t => <div key={t.id} className={"toast-item " + t.type}><span className="toast-icon">{t.type === "success" ? "\u2705" : t.type === "error" ? "\u274C" : t.type === "warning" ? "\u26A0\uFE0F" : "\u2139\uFE0F"}</span><span className="toast-msg">{t.msg}</span></div>)}</div></ToastCtx.Provider>;
+};
+
+function getVitalAlerts(p) {
+  var a = []; var hr = parseInt(p.vitals.heartRate, 10); var sys = parseInt((p.vitals.bp || "0/0").split("/")[0], 10); var t = parseFloat(p.vitals.temp); var o = parseInt(p.vitals.oxygen, 10);
+  if (hr > 100) a.push({ type: "warning", icon: "\u2764\uFE0F", msg: p.name + " - High HR: " + hr });
+  if (hr < 50 && hr > 0) a.push({ type: "danger", icon: "\u2764\uFE0F", msg: p.name + " - Low HR: " + hr });
+  if (sys > 140) a.push({ type: "warning", icon: "\uD83E\uDE78", msg: p.name + " - High BP: " + p.vitals.bp });
+  if (t > 100.4) a.push({ type: "warning", icon: "\uD83C\uDF21\uFE0F", msg: p.name + " - High Temp: " + t + "F" });
+  if (o < 95 && o > 0) a.push({ type: "danger", icon: "\uD83D\uDCA7", msg: p.name + " - Low O2: " + o + "%" });
+  return a;
+}
+
+function exportCSV(patients) {
+  var h = "ID,Name,Age,Gender,Phone,Email,Condition,BloodGroup,Emergency,HR,BP,Temp,O2,Weight,Date\n";
+  var r = patients.map(p => [p.id, '"' + p.name + '"', p.age, p.gender, p.phone, p.email || "", '"' + (p.condition || "") + '"', p.bloodGroup || "", '"' + (p.emergencyContact || "") + '"', p.vitals.heartRate || "", p.vitals.bp || "", p.vitals.temp || "", p.vitals.oxygen || "", p.vitals.weight || "", p.date].join(",")).join("\n");
+  var b = new Blob([h + r], { type: "text/csv" }); var u = URL.createObjectURL(b); var a = document.createElement("a"); a.href = u; a.download = "BioMonitor_Patients.csv"; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(u);
+}
+
+const ChartTooltip = ({ visible, x, y, title, value, detail, color }) => {
+  if (!visible) return null;
+  return <div className="chart-tooltip" style={{ left: x + 16, top: y - 10 }}><div className="ct-arrow"></div><div className="ct-header" style={{ borderBottomColor: color || "#3b82f6" }}><span className="ct-dot" style={{ background: color || "#3b82f6" }}></span><span className="ct-title">{title}</span></div><div className="ct-body"><div className="ct-value">{value}</div>{detail && <div className="ct-detail">{detail}</div>}</div></div>;
+};
+
+const InteractiveBar = ({ label, value, max, total, color, tooltip }) => {
+  const [h, setH] = useState(false); const [p, setP] = useState({ x: 0, y: 0 });
+  return <div className="ibar-row"><span className="ibar-label">{label}</span><div className="ibar-track" onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)} onMouseMove={e => setP({ x: e.clientX, y: e.clientY })}><div className="ibar-fill" style={{ width: (max > 0 ? (value / max) * 100 : 0) + "%", background: color }}><div className="ibar-shine"></div></div><div className="ibar-hover-zone"></div></div><span className="ibar-count">{value}</span><ChartTooltip visible={h} x={p.x} y={p.y} title={tooltip.title || label} value={tooltip.value || value} detail={tooltip.detail || (total > 0 ? Math.round((value / total) * 100) + "%" : "0%")} color={color} /></div>;
+};
+
+const DonutChart = ({ segments, size, thickness }) => {
+  const [hi, setHi] = useState(null); const [p, setP] = useState({ x: 0, y: 0 });
+  const r = (size || 120) / 2 - (thickness || 14); const c = 2 * Math.PI * r; const total = segments.reduce((s, seg) => s + seg.value, 0); let offset = 0;
+  return <div className="donut-wrapper" onMouseMove={e => setP({ x: e.clientX, y: e.clientY })} onMouseLeave={() => setHi(null)}><svg width={size || 120} height={size || 120} viewBox={"0 0 " + (size || 120) + " " + (size || 120)}>{segments.map((seg, i) => { const pct = total > 0 ? (seg.value / total) * 100 : 0; const dash = (pct / 100) * c; const gap = c - dash; const rot = (offset / total) * 360 - 90; offset += seg.value; return <circle key={i} cx={(size || 120) / 2} cy={(size || 120) / 2} r={r} fill="none" stroke={seg.color} strokeWidth={hi === i ? (thickness || 14) + 6 : (thickness || 14)} strokeDasharray={dash + " " + gap} transform={"rotate(" + rot + " " + (size || 120) / 2 + " " + (size || 120) / 2 + ")"} strokeLinecap="round" style={{ transition: "stroke-width 0.2s", cursor: "pointer" }} onMouseEnter={() => setHi(i)} />; })}<text x={(size || 120) / 2} y={(size || 120) / 2 - 8} textAnchor="middle" className="donut-center-num">{total}</text><text x={(size || 120) / 2} y={(size || 120) / 2 + 12} textAnchor="middle" className="donut-center-label">Total</text></svg><ChartTooltip visible={hi !== null} x={p.x} y={p.y} title={hi !== null ? segments[hi].label : ""} value={hi !== null ? segments[hi].value + " patients" : ""} detail={hi !== null && total > 0 ? Math.round((segments[hi].value / total) * 100) + "%" : ""} color={hi !== null ? segments[hi].color : "#3b82f6"} /></div>;
+};
+
+const ECGCanvas = ({ heartRate }) => {
+  const canvasRef = useRef(null); const dataRef = useRef([]);
+  useEffect(() => { var canvas = canvasRef.current; var ctx = canvas.getContext("2d"); var animId; var w = canvas.width = canvas.parentElement.offsetWidth; var h = canvas.height = 200; var x = 0; var speed = Math.max(1, Math.floor((heartRate || 72) / 30)); var amp = 40; var mid = h / 2; var tick = 0;
+    var draw = function () { ctx.fillStyle = "rgba(15,23,42,0.15)"; ctx.fillRect(0, 0, w, h); ctx.strokeStyle = "rgba(16,185,129,0.3)"; ctx.lineWidth = 0.5; for (var gy = 0; gy < h; gy += 20) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke(); } for (var gx = 0; gx < w; gx += 20) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke(); } tick++; var pos = tick % 60; var y = mid; if (pos < 5) y = mid - amp * 0.2; else if (pos < 10) y = mid + amp * 0.1; else if (pos < 15) y = mid - amp * 1.0; else if (pos < 20) y = mid + amp * 0.4; else if (pos < 25) y = mid - amp * 0.1; else y = mid; dataRef.current.push({ x: x, y: y }); if (dataRef.current.length > w) dataRef.current.shift(); ctx.beginPath(); ctx.strokeStyle = "#10b981"; ctx.lineWidth = 2.5; ctx.shadowColor = "#10b981"; ctx.shadowBlur = 8; dataRef.current.forEach(function (pt, i) { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); }); ctx.stroke(); ctx.shadowBlur = 0; var last = dataRef.current[dataRef.current.length - 1]; ctx.beginPath(); ctx.arc(last.x, last.y, 4, 0, Math.PI * 2); ctx.fillStyle = "#10b981"; ctx.fill(); x += speed; if (x > w) { x = 0; dataRef.current = []; } animId = requestAnimationFrame(draw); };
+    draw(); return () => cancelAnimationFrame(animId);
+  }, [heartRate]);
+  return <canvas ref={canvasRef} className="ecg-canvas" />;
+};
+
+const ParticleBackground = () => {
+  const ref = useRef(null);
+  useEffect(() => { var c = ref.current; var ctx = c.getContext("2d"); var id; var ps = []; var rs = function () { c.width = window.innerWidth; c.height = window.innerHeight; }; rs(); window.addEventListener("resize", rs);
+    function P() { this.x = Math.random() * c.width; this.y = Math.random() * c.height; this.s = Math.random() * 2 + 0.5; this.dx = (Math.random() - 0.5) * 0.8; this.dy = (Math.random() - 0.5) * 0.8; this.o = Math.random() * 0.5 + 0.1; var cl = ["#3b82f6", "#8b5cf6", "#06b6d4", "#10b981"]; this.c = cl[Math.floor(Math.random() * cl.length)]; }
+    P.prototype.up = function () { this.x += this.dx; this.y += this.dy; if (this.x < 0 || this.x > c.width || this.y < 0 || this.y > c.height) { this.x = Math.random() * c.width; this.y = Math.random() * c.height; } };
+    P.prototype.dr = function () { ctx.beginPath(); ctx.arc(this.x, this.y, this.s, 0, Math.PI * 2); ctx.fillStyle = this.c; ctx.globalAlpha = this.o; ctx.fill(); ctx.globalAlpha = 1; };
+    for (var i = 0; i < 80; i++) ps.push(new P());
+    var an = function () { ctx.clearRect(0, 0, c.width, c.height); ps.forEach(function (pp) { pp.up(); pp.dr(); }); for (var i = 0; i < ps.length; i++) { for (var j = i + 1; j < ps.length; j++) { var dx = ps[i].x - ps[j].x; var dy = ps[i].y - ps[j].y; var d = Math.sqrt(dx * dx + dy * dy); if (d < 120) { ctx.beginPath(); ctx.strokeStyle = "#3b82f6"; ctx.globalAlpha = 0.08 * (1 - d / 120); ctx.lineWidth = 0.5; ctx.moveTo(ps[i].x, ps[i].y); ctx.lineTo(ps[j].x, ps[j].y); ctx.stroke(); ctx.globalAlpha = 1; } } } id = requestAnimationFrame(an); }; an();
+    return function () { window.removeEventListener("resize", rs); cancelAnimationFrame(id); };
+  }, []);
+  return <canvas ref={ref} style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", zIndex: 0, pointerEvents: "none" }} />;
+};
+
+const LoadingScreen = () => {
+  var pg = useState(0); var p = pg[0]; var setP = pg[1];
+  var tx = useState("Initializing BioMonitor..."); var t = tx[0]; var setT = tx[1];
+  var r = useRef(0);
+  useEffect(function () { var texts = ["Initializing...", "Loading AI Engine...", "Connecting to Gemini...", "Almost Ready..."]; var iv = setInterval(function () { setP(function (prev) { if (prev >= 100) { clearInterval(iv); return 100; } return prev + 2; }); }, 40); var tv = setInterval(function () { r.current = (r.current + 1) % texts.length; setT(texts[r.current]); }, 800); return function () { clearInterval(iv); clearInterval(tv); }; }, []);
+  return <div className="loading-screen"><div className="loading-content"><div className="loading-logo"><div className="logo-circle"><span className="logo-b">B</span></div><div className="loading-pulse"></div></div><h2 className="loading-title">BioMonitor</h2><p className="loading-subtitle">Clinical Intelligence Platform</p><div className="loading-bar-container"><div className="loading-bar" style={{ width: p + "%" }}></div></div><p className="loading-text">{t}</p></div></div>;
+};
+
+const Login = ({ onLogin }) => {
+  var uSt = useState(""); var u = uSt[0]; var setU = uSt[1]; var pwSt = useState(""); var pw = pwSt[0]; var setPw = pwSt[1]; var eSt = useState(""); var err = eSt[0]; var setErr = eSt[1]; var lSt = useState(false); var ld = lSt[0]; var setLd = lSt[1]; var spSt = useState(false); var sp = spSt[0]; var setSp = spSt[1]; var fcSt = useState(""); var fc = fcSt[0]; var setFc = fcSt[1]; var shSt = useState(false); var sh = shSt[0]; var setSh = shSt[1]; var scSt = useState(false); var sc = scSt[0]; var setSc = scSt[1];
+  var USERS = { admin: { pw: "admin123", role: "admin", name: "Dr. Admin" }, doctor: { pw: "doctor123", role: "doctor", name: "Dr. Hamad" }, nurse: { pw: "nurse123", role: "nurse", name: "Nurse Fatima" } };
+  var hL = function (e) { e.preventDefault(); setErr(""); setLd(true); setTimeout(function () { var us = USERS[u]; if (us && us.pw === pw) { setSc(true); setTimeout(function () { localStorage.setItem("isLoggedIn", "true"); localStorage.setItem("username", u); localStorage.setItem("userRole", us.role); localStorage.setItem("displayName", us.name); onLogin(true); }, 1200); } else { setErr("Invalid credentials."); setSh(true); setTimeout(function () { setSh(false); }, 600); setLd(false); } }, 1500); };
+  return <div className="login-page"><ParticleBackground /><div className="orb orb-1"></div><div className="orb orb-2"></div><div className="orb orb-3"></div><div className={"login-container" + (sh ? " shake" : "")}><div className="login-left"><div className="login-left-content"><div className="brand-logo"><div className="brand-circle"><span>B</span></div></div><h1 className="brand-name">BioMonitor</h1><p className="brand-tagline">Clinical Intelligence Platform</p><div className="features-list"><div className="feature-item"><div className="feature-icon">&#x1F916;</div><div><h4>AI-Powered</h4><p>Medical analysis</p></div></div><div className="feature-item"><div className="feature-icon">&#x1F4CA;</div><div><h4>Monitoring</h4><p>Real-time vitals</p></div></div><div className="feature-item"><div className="feature-icon">&#x2764;&#xFE0F;</div><div><h4>ECG</h4><p>Live simulation</p></div></div><div className="feature-item"><div className="feature-icon">&#x1F4CB;</div><div><h4>Records</h4><p>Digital management</p></div></div></div></div></div><div className="login-right"><div className="login-right-content">{sc ? <div className="success-animation"><div className="success-checkmark"><div className="checkmark-circle"></div><div className="checkmark-check">&#x2713;</div></div><h2>Welcome!</h2></div> : <><div className="login-header"><h2>Welcome Back &#x1F44B;</h2></div>{err && <div className="login-error">&#x26A0;&#xFE0F; {err}</div>}<form onSubmit={hL} className="login-form"><div className={"input-group" + (fc === "u" ? " focused" : "")}><label>Username</label><div className="input-wrapper"><span className="input-icon">&#x1F464;</span><input type="text" value={u} onChange={function (e) { setU(e.target.value); }} onFocus={function () { setFc("u"); }} onBlur={function () { setFc(""); }} placeholder="Username" required /><div className="input-line"></div></div></div><div className={"input-group" + (fc === "p" ? " focused" : "")}><label>Password</label><div className="input-wrapper"><span className="input-icon">&#x1F512;</span><input type={sp ? "text" : "password"} value={pw} onChange={function (e) { setPw(e.target.value); }} onFocus={function () { setFc("p"); }} onBlur={function () { setFc(""); }} placeholder="Password" required /><button type="button" className="toggle-password" onClick={function () { setSp(!sp); }}>{sp ? "\uD83D\uDE48" : "\uD83D\uDC41\uFE0F"}</button><div className="input-line"></div></div></div><button type="submit" className={"login-button" + (ld ? " loading" : "") + (sc ? " success" : "")} disabled={ld || sc}>{ld ? <div className="button-spinner"></div> : <span>Sign In &#x2192;</span>}</button></form><div className="demo-credentials"><div className="demo-header"><span>&#x1F4A1; Demo Accounts</span></div><div className="demo-body"><code>admin</code><span>/</span><code>admin123</code></div><div className="demo-body"><code>doctor</code><span>/</span><code>doctor123</code></div><div className="demo-body"><code>nurse</code><span>/</span><code>nurse123</code></div></div></>}</div></div></div></div>;
+};
+
+const LiveTimeBar = ({ user }) => {
+  var tSt = useState(new Date()); var t = tSt[0]; var setT = tSt[1];
+  useEffect(function () { var iv = setInterval(function () { setT(new Date()); }, 1000); return function () { clearInterval(iv); }; }, []);
+  var theme = useTheme();
+  return <div className="live-time-bar"><div className="ltb-left"><div className="ltb-clock">{t.getHours().toString().padStart(2, "0")}:{t.getMinutes().toString().padStart(2, "0")}:{t.getSeconds().toString().padStart(2, "0")}</div><div className="ltb-date">{t.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</div></div><div className="ltb-right"><div className="ltb-user-info"><span className="ltb-role-badge">{user.role}</span><span className="ltb-user-name">{user.name}</span></div><button className="theme-toggle" onClick={theme.toggle}>{theme.theme === "dark" ? "\u2600\uFE0F" : "\uD83C\uDF19"}</button><div className="ltb-live-dot"></div><span>LIVE</span></div></div>;
+};
+
+const AlertsPanel = ({ patients }) => { var all = []; patients.forEach(function (p) { getVitalAlerts(p).forEach(function (a) { all.push(a); }); }); if (all.length === 0) return <div className="alerts-panel"><div className="alerts-header"><span>&#x1F514;</span><h3>Alerts</h3><span className="alerts-count green">0</span></div><div className="alerts-empty"><p>&#x2705; All stable.</p></div></div>; return <div className="alerts-panel"><div className="alerts-header"><span>&#x1F514;</span><h3>Alerts</h3><span className="alerts-count red">{all.length}</span></div><div className="alerts-list">{all.map(function (a, i) { return <div key={i} className={"alert-item " + a.type}><span>{a.icon}</span><p>{a.msg}</p><span className={"alert-badge " + a.type}>{a.type}</span></div>; })}</div></div>; };
+
+const DashboardPage = ({ patients, onNavigate }) => { var total = patients.length; var alerts = patients.reduce(function (s, p) { return s + getVitalAlerts(p).length; }, 0); var mc = patients.filter(function (p) { return p.gender === "male"; }).length; var fc = patients.filter(function (p) { return p.gender === "female"; }).length; return <div className="page-container"><div className="page-hero dashboard-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F3E5;</div><div><h1>Dashboard</h1><p>Welcome back! Here is your overview.</p></div></div></div><div className="stats-grid"><div className="stat-card blue"><div className="stat-icon">&#x1F465;</div><div className="stat-info"><h3>{total}</h3><p>Patients</p></div></div><div className="stat-card green"><div className="stat-icon">&#x2642;&#xFE0F;</div><div className="stat-info"><h3>{mc}</h3><p>Male</p></div></div><div className="stat-card purple"><div className="stat-icon">&#x2640;&#xFE0F;</div><div className="stat-info"><h3>{fc}</h3><p>Female</p></div></div><div className="stat-card orange"><div className="stat-icon">&#x1F534;</div><div className="stat-info"><h3>{alerts}</h3><p>Alerts</p></div></div></div><h3 style={{ marginBottom: 16, fontSize: 16, fontWeight: 600 }}>&#x26A1; Quick Actions</h3><div className="quick-actions-grid"><button className="qa-card" onClick={function () { onNavigate("records"); }}><span className="qa-icon">&#x2795;</span><span className="qa-label">Add Patient</span></button><button className="qa-card" onClick={function () { onNavigate("vitals"); }}><span className="qa-icon">&#x1F4A8;</span><span className="qa-label">Vitals Live</span></button><button className="qa-card" onClick={function () { onNavigate("ecg"); }}><span className="qa-icon">&#x2764;&#xFE0F;</span><span className="qa-label">ECG</span></button><button className="qa-card" onClick={function () { onNavigate("appointments"); }}><span className="qa-icon">&#x1F4C5;</span><span className="qa-label">Appointments</span></button><button className="qa-card" onClick={function () { onNavigate("prescriptions"); }}><span className="qa-icon">&#x1F48A;</span><span className="qa-label">Prescriptions</span></button><button className="qa-card" onClick={function () { onNavigate("reports"); }}><span className="qa-icon">&#x1F4CA;</span><span className="qa-label">Reports</span></button><button className="qa-card" onClick={function () { exportCSV(patients); }}><span className="qa-icon">&#x1F4E5;</span><span className="qa-label">Export CSV</span></button><button className="qa-card" onClick={function () { onNavigate("ai"); }}><span className="qa-icon">&#x1F916;</span><span className="qa-label">AI Assistant</span></button></div></div>; };
+
+const PatientsPage = ({ patients, setPatients, addLog, addNotif }) => { var toast = useToast(); var st = useState(""); var search = st[0]; var setSearch = st[1]; var st2 = useState(null); var vp = st2[0]; var setVp = st2[1]; var st3 = useState(null); var hp = st3[0]; var setHp = st3[1]; var filtered = patients.filter(function (p) { var t = search.toLowerCase(); return p.name.toLowerCase().indexOf(t) !== -1 || (p.condition && p.condition.toLowerCase().indexOf(t) !== -1) || String(p.id).indexOf(t) !== -1; }); var del = function (id) { if (window.confirm("Delete this patient?")) { var n = patients.find(function (p) { return p.id === id; }); setPatients(function (p) { return p.filter(function (x) { return x.id !== id; }); }); toast.addToast(n ? n.name + " deleted." : "Deleted.", "info"); if (addLog) addLog("Patient deleted: " + (n ? n.name : ""), "danger"); if (addNotif) addNotif("Patient deleted: " + (n ? n.name : ""), "danger"); } }; var dlPdf = async function (pt) { try { var r = await fetch("http://127.0.0.1:8001/api/download-report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ patient: { id: pt.id, name: pt.name, age: pt.age, gender: pt.gender, phone: pt.phone, email: pt.email, condition: pt.condition, notes: pt.notes, date: pt.date }, vitals: pt.vitals }) }); if (!r.ok) throw new Error("fail"); var b = await r.blob(); var u = URL.createObjectURL(b); var a = document.createElement("a"); a.href = u; a.download = "Report_" + pt.name.replace(/\s+/g, "_") + ".pdf"; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(u); toast.addToast("PDF downloaded!", "success"); if (addNotif) addNotif("PDF downloaded: " + pt.name, "success"); } catch (e) { toast.addToast("PDF failed.", "error"); } };
+  return <div className="page-container"><div className="page-hero patients-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F465;</div><div><h1>Patients</h1><p>Manage all patient records</p></div></div><div className="hero-stats"><div className="hero-stat"><span className="hero-stat-num">{patients.length}</span><span className="hero-stat-label">Total</span></div><div className="hero-stat"><span className="hero-stat-num">{patients.filter(function (p) { return p.gender === "male"; }).length}</span><span className="hero-stat-label">Male</span></div><div className="hero-stat"><span className="hero-stat-num">{patients.filter(function (p) { return p.gender === "female"; }).length}</span><span className="hero-stat-label">Female</span></div></div></div><div className="patients-toolbar"><div className="search-box"><span>&#x1F50D;</span><input type="text" placeholder="Search..." value={search} onChange={function (e) { setSearch(e.target.value); }} /></div><button className="export-btn" onClick={function () { exportCSV(patients); toast.addToast("CSV exported!", "success"); if (addNotif) addNotif("Data exported as CSV", "info"); }}>&#x1F4E5; Export CSV</button><span className="patient-count">{filtered.length} found</span></div><AlertsPanel patients={patients} />{filtered.length === 0 ? <div className="empty-state"><div className="empty-icon">&#x1F4CB;</div><h3>No Patients</h3></div> : <div className="patient-cards-grid">{filtered.map(function (p) { return <div key={p.id} className="patient-card"><div className="card-header"><div className="card-patient-info"><div className={"card-avatar " + p.gender}>{p.name.charAt(0)}</div><div className="card-name-section"><h3 className="card-name">{p.name}</h3><span className="card-id">P-{String(p.id).padStart(4, "0")}</span></div></div><div className="card-badges"><span className={"gender-badge " + p.gender}>{p.gender}</span>{p.bloodGroup && <span className="blood-badge">{p.bloodGroup}</span>}</div></div><div className="card-body"><div className="card-info-grid"><div className="card-info-item"><span className="info-label">Age</span><span className="info-value">{p.age} yrs</span></div><div className="card-info-item"><span className="info-label">Phone</span><span className="info-value">{p.phone}</span></div><div className="card-info-item"><span className="info-label">Condition</span><span className="info-value">{p.condition || "General"}</span></div><div className="card-info-item"><span className="info-label">Emergency</span><span className="info-value">{p.emergencyContact || "N/A"}</span></div></div><div className="card-vitals"><div className="mini-vital"><span>&#x2764;&#xFE0F;</span><span>{p.vitals.heartRate || "--"}</span><span className="mini-label">bpm</span></div><div className="mini-vital"><span>&#x1FA78;</span><span>{p.vitals.bp || "--"}</span><span className="mini-label">BP</span></div><div className="mini-vital"><span>&#x1F321;&#xFE0F;</span><span>{p.vitals.temp || "--"}</span><span className="mini-label">temp</span></div><div className="mini-vital"><span>&#x1F4A7;</span><span>{p.vitals.oxygen || "--"}</span><span className="mini-label">O2</span></div></div></div><div className="card-footer"><button className="card-btn view-btn" onClick={function () { setVp(p); }}>&#x1F441;&#xFE0F; View</button><button className="card-btn history-btn" onClick={function () { setHp(p); }}>&#x1F4C5; History</button><button className="card-btn download-btn" onClick={function () { dlPdf(p); }}>&#x1F4E5; PDF</button><button className="card-btn delete-btn" onClick={function () { del(p.id); }}>&#x1F5D1;&#xFE0F; Delete</button></div></div>; })}</div>} {vp && <div className="modal-overlay" onClick={function () { setVp(null); }}><div className="modal-content" onClick={function (e) { e.stopPropagation(); }}><div className="modal-header"><h2>Patient Details</h2><button className="modal-close" onClick={function () { setVp(null); }}>&#x2715;</button></div><div className="modal-body"><div className="detail-grid"><div className="detail-item"><label>ID</label><span>P-{String(vp.id).padStart(4, "0")}</span></div><div className="detail-item"><label>Name</label><span>{vp.name}</span></div><div className="detail-item"><label>Age</label><span>{vp.age} yrs</span></div><div className="detail-item"><label>Gender</label><span>{vp.gender}</span></div><div className="detail-item"><label>Phone</label><span>{vp.phone}</span></div><div className="detail-item"><label>Blood Group</label><span>{vp.bloodGroup || "N/A"}</span></div><div className="detail-item"><label>Emergency</label><span>{vp.emergencyContact || "N/A"}</span></div><div className="detail-item"><label>Condition</label><span>{vp.condition || "General"}</span></div></div><div className="vitals-section"><h3>&#x2764;&#xFE0F; Vitals</h3><div className="vitals-grid"><div className="vital-card"><span className="vital-emoji">&#x2764;&#xFE0F;</span><span className="vital-label">HR</span><span className="vital-value">{vp.vitals.heartRate} bpm</span></div><div className="vital-card"><span className="vital-emoji">&#x1FA78;</span><span className="vital-label">BP</span><span className="vital-value">{vp.vitals.bp}</span></div><div className="vital-card"><span className="vital-emoji">&#x1F321;&#xFE0F;</span><span className="vital-label">Temp</span><span className="vital-value">{vp.vitals.temp}</span></div><div className="vital-card"><span className="vital-emoji">&#x1F4A7;</span><span className="vital-label">O2</span><span className="vital-value">{vp.vitals.oxygen}%</span></div><div className="vital-card"><span className="vital-emoji">&#x2696;&#xFE0F;</span><span className="vital-label">Weight</span><span className="vital-value">{vp.vitals.weight} kg</span></div></div></div>{vp.notes && <div className="notes-section"><h3>Notes</h3><p>{vp.notes}</p></div>}</div></div></div>} {hp && <div className="modal-overlay" onClick={function () { setHp(null); }}><div className="modal-content" onClick={function (e) { e.stopPropagation(); }}><div className="modal-header"><h2>History - {hp.name}</h2><button className="modal-close" onClick={function () { setHp(null); }}>&#x2715;</button></div><div className="modal-body"><div className="history-timeline"><div className="timeline-item"><div className="timeline-dot green"></div><div className="timeline-content"><h4>Registered</h4><p>Added on {hp.date}</p></div></div><div className="timeline-item"><div className="timeline-dot blue"></div><div className="timeline-content"><h4>Vitals</h4><p>HR: {hp.vitals.heartRate} | BP: {hp.vitals.bp}</p></div></div>{hp.condition && <div className="timeline-item"><div className="timeline-dot orange"></div><div className="timeline-content"><h4>Diagnosis: {hp.condition}</h4><p>{hp.notes || "No notes."}</p></div></div>}</div></div></div></div>} </div>; };
+
+const AddRecordsPage = ({ patients, setPatients, addLog, addNotif }) => { var toast = useToast(); var fdSt = useState({ name: "", age: "", gender: "", phone: "", email: "", condition: "", notes: "", bloodGroup: "", emergencyContact: "" }); var fd = fdSt[0]; var setFd = fdSt[1]; var vtSt = useState({ heartRate: "", bp: "", temp: "", oxygen: "", weight: "" }); var vt = vtSt[0]; var setVt = vtSt[1]; var tabSt = useState("patient"); var tab = tabSt[0]; var setTab = tabSt[1]; var hC = function (e) { setFd(Object.assign({}, fd, { [e.target.name]: e.target.value })); }; var hV = function (e) { setVt(Object.assign({}, vt, { [e.target.name]: e.target.value })); }; var hS = function (e) { e.preventDefault(); if (!fd.name || !fd.age || !fd.gender || !fd.phone) { toast.addToast("Fill required!", "warning"); return; } var np = Object.assign({ id: patients.length > 0 ? Math.max.apply(null, patients.map(function (p) { return p.id; })) + 1 : 1, vitals: Object.assign({}, vt), date: new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }) }, fd); setPatients(function (p) { return p.concat([np]); }); toast.addToast(fd.name + " added!", "success"); if (addLog) addLog("Patient added: " + fd.name, "success"); if (addNotif) addNotif("New patient: " + fd.name, "success"); setFd({ name: "", age: "", gender: "", phone: "", email: "", condition: "", notes: "", bloodGroup: "", emergencyContact: "" }); setVt({ heartRate: "", bp: "", temp: "", oxygen: "", weight: "" }); setTab("patient"); };
+  return <div className="page-container"><div className="page-hero records-hero"><div className="hero-content"><div className="hero-icon-box">&#x2795;</div><div><h1>Add Patient</h1></div></div></div><form className="record-form" onSubmit={hS}><div className="record-tabs"><button type="button" className={"record-tab" + (tab === "patient" ? " active" : "")} onClick={function () { setTab("patient"); }}>&#x1F464; Info</button><button type="button" className={"record-tab" + (tab === "vitals" ? " active" : "")} onClick={function () { setTab("vitals"); }}>&#x2764;&#xFE0F; Vitals</button><button type="button" className={"record-tab" + (tab === "notes" ? " active" : "")} onClick={function () { setTab("notes"); }}>&#x1F4DD; Notes</button></div>{tab === "patient" && <div className="record-card"><div className="record-card-header"><span>&#x1F464;</span><h3>Patient Info</h3></div><div className="record-card-body"><div className="form-row"><div className="form-field"><label>Name *</label><input type="text" name="name" value={fd.name} onChange={hC} required /></div><div className="form-field"><label>Age *</label><input type="number" name="age" value={fd.age} onChange={hC} required /></div></div><div className="form-row"><div className="form-field"><label>Gender *</label><select name="gender" value={fd.gender} onChange={hC} required><option value="">Select</option><option value="male">Male</option><option value="female">Female</option><option value="other">Other</option></select></div><div className="form-field"><label>Phone *</label><input type="tel" name="phone" value={fd.phone} onChange={hC} required /></div></div><div className="form-row"><div className="form-field"><label>Email</label><input type="email" name="email" value={fd.email} onChange={hC} /></div><div className="form-field"><label>Condition</label><input type="text" name="condition" value={fd.condition} onChange={hC} /></div></div><div className="form-row"><div className="form-field"><label>Blood Group</label><select name="bloodGroup" value={fd.bloodGroup} onChange={hC}><option value="">Select</option><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>AB+</option><option>AB-</option><option>O+</option><option>O-</option></select></div><div className="form-field"><label>Emergency Contact</label><input type="text" name="emergencyContact" value={fd.emergencyContact} onChange={hC} placeholder="Name - Phone" /></div></div><button type="button" className="next-btn" onClick={function () { setTab("vitals"); }}>Next: Vitals &#x2192;</button></div></div>}{tab === "vitals" && <div className="record-card"><div className="record-card-header vitals"><span>&#x2764;&#xFE0F;</span><h3>Vitals</h3></div><div className="record-card-body"><div className="vitals-form-grid"><div className="vital-input-card"><div className="vic-icon red">&#x2764;&#xFE0F;</div><label>Heart Rate</label><input type="text" name="heartRate" value={vt.heartRate} onChange={hV} placeholder="72" /></div><div className="vital-input-card"><div className="vic-icon blue">&#x1FA78;</div><label>Blood Pressure</label><input type="text" name="bp" value={vt.bp} onChange={hV} placeholder="120/80" /></div><div className="vital-input-card"><div className="vic-icon orange">&#x1F321;&#xFE0F;</div><label>Temperature</label><input type="text" name="temp" value={vt.temp} onChange={hV} placeholder="98.6" /></div><div className="vital-input-card"><div className="vic-icon cyan">&#x1F4A7;</div><label>Oxygen %</label><input type="text" name="oxygen" value={vt.oxygen} onChange={hV} placeholder="98" /></div><div className="vital-input-card"><div className="vic-icon purple">&#x2696;&#xFE0F;</div><label>Weight kg</label><input type="text" name="weight" value={vt.weight} onChange={hV} placeholder="70" /></div></div><div className="record-nav-buttons"><button type="button" className="back-btn" onClick={function () { setTab("patient"); }}>&#x2190; Back</button><button type="button" className="next-btn" onClick={function () { setTab("notes"); }}>Next &#x2192;</button></div></div></div>}{tab === "notes" && <div className="record-card"><div className="record-card-header notes"><span>&#x1F4DD;</span><h3>Notes</h3></div><div className="record-card-body"><div className="form-field full-width"><textarea name="notes" value={fd.notes} onChange={hC} placeholder="Notes..." rows="5"></textarea></div><div className="record-nav-buttons"><button type="button" className="back-btn" onClick={function () { setTab("vitals"); }}>&#x2190; Back</button><button type="submit" className="submit-btn">&#x1F4BE; Save Patient</button></div></div></div>}</form></div>; };
+
+const ECGPage = ({ patients }) => { var sSt = useState(patients.length > 0 ? patients[0] : null); var sel = sSt[0]; var setSel = sSt[1]; var hrSt = useState(sel ? parseInt(sel.vitals.heartRate, 10) : 72); var hr = hrSt[0]; var setHr = hrSt[1]; useEffect(function () { var iv = setInterval(function () { setHr(function (prev) { return Math.max(50, Math.min(130, prev + Math.floor(Math.random() * 7) - 3)); }); }, 3000); return function () { clearInterval(iv); }; }, []); return <div className="page-container"><div className="page-hero ecg-hero"><div className="hero-content"><div className="hero-icon-box">&#x2764;&#xFE0F;</div><div><h1>ECG Monitor</h1></div></div></div><div className="ecg-controls"><label>Patient: </label><select value={sel ? sel.id : ""} onChange={function (e) { var p = patients.find(function (x) { return x.id === parseInt(e.target.value); }); setSel(p); if (p) setHr(parseInt(p.vitals.heartRate, 10)); }}><option value="">Select</option>{patients.map(function (p) { return <option key={p.id} value={p.id}>{p.name}</option>; })}</select></div><div className="ecg-container"><div className="ecg-header"><span className="ecg-patient-name">{sel ? sel.name : "None"}</span><span className="ecg-hr-display">&#x2764;&#xFE0F; {hr} bpm</span><span className="ecg-status-live">&#x1F7E2; LIVE</span></div><ECGCanvas heartRate={hr} /></div>{sel && <div className="ecg-info-cards"><div className="ecg-info-card"><span>&#x2764;&#xFE0F;</span><span className="ecg-info-val">{hr}</span><span className="ecg-info-label">HR</span></div><div className="ecg-info-card"><span>&#x1FA78;</span><span className="ecg-info-val">{sel.vitals.bp || "--"}</span><span className="ecg-info-label">BP</span></div><div className="ecg-info-card"><span>&#x1F4A7;</span><span className="ecg-info-val">{sel.vitals.oxygen || "--"}%</span><span className="ecg-info-label">O2</span></div><div className="ecg-info-card"><span>&#x1F321;&#xFE0F;</span><span className="ecg-info-val">{sel.vitals.temp || "--"}</span><span className="ecg-info-label">Temp</span></div></div>}</div>; };
+
+const AppointmentsPage = ({ patients, appts, setAppts, addLog, addNotif }) => { var toast = useToast(); var sfSt = useState(false); var sf = sfSt[0]; var setSf = sfSt[1]; var fSt = useState({ patientId: "", doctor: "", date: "", time: "", reason: "" }); var f = fSt[0]; var setF = fSt[1]; var flSt = useState("all"); var fl = flSt[0]; var setFl = flSt[1]; var addA = function (e) { e.preventDefault(); if (!f.patientId || !f.date || !f.time) { toast.addToast("Fill required!", "warning"); return; } var p = patients.find(function (x) { return x.id === parseInt(f.patientId); }); var newA = { id: Date.now(), patientId: parseInt(f.patientId), patient: p ? p.name : "Unknown", doctor: f.doctor || "Dr. Hamad", date: f.date, time: f.time, status: "pending", reason: f.reason }; setAppts(function (prev) { return prev.concat([newA]); }); toast.addToast("Booked!", "success"); if (addLog) addLog("Appointment: " + newA.patient, "success"); if (addNotif) addNotif("Appointment booked: " + newA.patient, "success"); setF({ patientId: "", doctor: "", date: "", time: "", reason: "" }); setSf(false); }; var upd = function (id, status) { setAppts(function (p) { return p.map(function (a) { return a.id === id ? Object.assign({}, a, { status: status }) : a; }); }); toast.addToast("Updated!", "success"); if (addNotif) addNotif("Appointment " + status, "info"); }; var filtered = fl === "all" ? appts : appts.filter(function (a) { return a.status === fl; });
+  return <div className="page-container"><div className="page-hero appt-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F4C5;</div><div><h1>Appointments</h1></div></div><div className="hero-stats"><div className="hero-stat"><span className="hero-stat-num">{appts.length}</span><span className="hero-stat-label">Total</span></div></div></div><div className="patients-toolbar"><div className="device-filter-group"><button className={"device-filter" + (fl === "all" ? " active" : "")} onClick={function () { setFl("all"); }}>All</button><button className={"device-filter" + (fl === "pending" ? " active" : "")} onClick={function () { setFl("pending"); }}>Pending</button><button className={"device-filter" + (fl === "confirmed" ? " active" : "")} onClick={function () { setFl("confirmed"); }}>Confirmed</button><button className={"device-filter" + (fl === "completed" ? " active" : "")} onClick={function () { setFl("completed"); }}>Done</button></div><button className="next-btn" onClick={function () { setSf(!sf); }}>{sf ? "Cancel" : "+ New"}</button></div>{sf && <div className="record-card" style={{ marginBottom: 24 }}><div className="record-card-header"><span>&#x1F4C5;</span><h3>Book Appointment</h3></div><div className="record-card-body"><form onSubmit={addA}><div className="form-row"><div className="form-field"><label>Patient</label><select value={f.patientId} onChange={function (e) { setF(Object.assign({}, f, { patientId: e.target.value })); }} required><option value="">Select</option>{patients.map(function (p) { return <option key={p.id} value={p.id}>{p.name}</option>; })}</select></div><div className="form-field"><label>Doctor</label><select value={f.doctor} onChange={function (e) { setF(Object.assign({}, f, { doctor: e.target.value })); }}><option>Dr. Hamad</option><option>Dr. Admin</option></select></div></div><div className="form-row"><div className="form-field"><label>Date</label><input type="date" value={f.date} onChange={function (e) { setF(Object.assign({}, f, { date: e.target.value })); }} required /></div><div className="form-field"><label>Time</label><select value={f.time} onChange={function (e) { setF(Object.assign({}, f, { time: e.target.value })); }} required><option value="">Select</option><option>09:00 AM</option><option>10:00 AM</option><option>11:00 AM</option><option>02:00 PM</option><option>03:00 PM</option></select></div></div><button type="submit" className="submit-btn">&#x1F4BE; Book</button></form></div></div>}<div className="appt-list">{filtered.map(function (a) { return <div key={a.id} className={"appt-card " + a.status}><div className="appt-left"><div className="appt-date-box"><span className="appt-day">{a.date.split("-")[2]}</span><span className="appt-month">{new Date(a.date).toLocaleDateString("en", { month: "short" })}</span></div></div><div className="appt-center"><h3>{a.patient}</h3><p>{a.doctor} | {a.time}</p></div><div className="appt-right"><span className={"appt-status-badge " + a.status}>{a.status}</span><div className="appt-actions">{a.status === "pending" && <button className="card-btn history-btn" onClick={function () { upd(a.id, "confirmed"); }}>Confirm</button>}{a.status === "confirmed" && <button className="card-btn download-btn" onClick={function () { upd(a.id, "completed"); }}>Done</button>}<button className="card-btn delete-btn" onClick={function () { setAppts(function (p) { return p.filter(function (x) { return x.id !== a.id; }); }); if (addNotif) addNotif("Appointment removed", "info"); }}>&#x1F5D1;</button></div></div></div>; })}</div></div>; };
+
+const PrescriptionPage = ({ patients, rxList, setRxList, addLog, addNotif }) => { var toast = useToast(); var sfSt = useState(false); var sf = sfSt[0]; var setSf = sfSt[1]; var fSt = useState({ patientId: "", medicine: "", dosage: "", duration: "", notes: "" }); var f = fSt[0]; var setF = fSt[1]; var addRx = function (e) { e.preventDefault(); if (!f.patientId || !f.medicine) { toast.addToast("Fill required!", "warning"); return; } var p = patients.find(function (x) { return x.id === parseInt(f.patientId); }); setRxList(function (prev) { return prev.concat([{ id: Date.now(), patientId: parseInt(f.patientId), patient: p ? p.name : "Unknown", medicine: f.medicine, dosage: f.dosage, duration: f.duration, notes: f.notes, date: new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }) }]); }); toast.addToast("Added!", "success"); if (addLog) addLog("Rx: " + f.medicine, "success"); if (addNotif) addNotif("New Rx: " + f.medicine, "success"); setF({ patientId: "", medicine: "", dosage: "", duration: "", notes: "" }); setSf(false); };
+  return <div className="page-container"><div className="page-hero rx-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F48A;</div><div><h1>Prescriptions</h1></div></div><div className="hero-stats"><div className="hero-stat"><span className="hero-stat-num">{rxList.length}</span><span className="hero-stat-label">Active</span></div></div></div><div className="patients-toolbar"><button className="next-btn" onClick={function () { setSf(!sf); }}>{sf ? "Cancel" : "+ New Rx"}</button></div>{sf && <div className="record-card" style={{ marginBottom: 24 }}><div className="record-card-header"><span>&#x1F48A;</span><h3>New Prescription</h3></div><div className="record-card-body"><form onSubmit={addRx}><div className="form-row"><div className="form-field"><label>Patient</label><select value={f.patientId} onChange={function (e) { setF(Object.assign({}, f, { patientId: e.target.value })); }} required><option value="">Select</option>{patients.map(function (p) { return <option key={p.id} value={p.id}>{p.name}</option>; })}</select></div><div className="form-field"><label>Medicine</label><input type="text" value={f.medicine} onChange={function (e) { setF(Object.assign({}, f, { medicine: e.target.value })); }} required /></div></div><div className="form-row"><div className="form-field"><label>Dosage</label><input type="text" value={f.dosage} onChange={function (e) { setF(Object.assign({}, f, { dosage: e.target.value })); }} placeholder="Twice daily" /></div><div className="form-field"><label>Duration</label><input type="text" value={f.duration} onChange={function (e) { setF(Object.assign({}, f, { duration: e.target.value })); }} placeholder="30 days" /></div></div><button type="submit" className="submit-btn">&#x1F4BE; Save</button></form></div></div>}<div className="rx-list">{rxList.map(function (rx) { return <div key={rx.id} className="rx-card"><div className="rx-header"><div className="rx-patient">{rx.patient}</div><span className="rx-date">{rx.date}</span></div><div className="rx-body"><div className="rx-medicine">{rx.medicine}</div><div className="rx-details"><span>{rx.dosage}</span><span>{rx.duration}</span></div>{rx.notes && <div className="rx-notes">{rx.notes}</div>}</div><button className="card-btn delete-btn" style={{ margin: "0 16px 16px" }} onClick={function () { setRxList(function (p) { return p.filter(function (x) { return x.id !== rx.id; }); }); if (addNotif) addNotif("Rx removed", "info"); }}>Remove</button></div>; })}</div></div>; };
+
+const DevicesPage = ({ devices, setDevices }) => { var flSt = useState("all"); var fl = flSt[0]; var setFl = flSt[1]; var toggle = function (id) { setDevices(function (p) { return p.map(function (d) { return d.id === id ? Object.assign({}, d, { status: d.status === "offline" ? "online" : "offline" }) : d; }); }); }; var filtered = fl === "all" ? devices : devices.filter(function (d) { return d.status === fl; });
+  return <div className="page-container"><div className="page-hero devices-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F4BB;</div><div><h1>Devices</h1></div></div></div><div className="device-filter-group" style={{ marginBottom: 24 }}><button className={"device-filter" + (fl === "all" ? " active" : "")} onClick={function () { setFl("all"); }}>All</button><button className={"device-filter" + (fl === "online" ? " active" : "")} onClick={function () { setFl("online"); }}>Online</button><button className={"device-filter" + (fl === "offline" ? " active" : "")} onClick={function () { setFl("offline"); }}>Offline</button></div><div className="devices-grid">{filtered.map(function (d) { return <div key={d.id} className={"device-card " + d.status}><div className="dc-header"><div className="dc-type-icon">{d.type === "ECG" ? "\u2764\uFE0F" : d.type === "SpO2" ? "\uD83D\uDCA7" : d.type === "BP" ? "\uD83E\uDE78" : "\uD83C\uDF21\uFE0F"}</div><div className="dc-status-dot" style={{ background: d.status === "online" ? "#10b981" : "#ef4444" }}></div></div><h3 className="dc-name">{d.name}</h3><div className="dc-battery"><div className="dc-battery-bar"><div className="dc-battery-fill" style={{ width: d.battery + "%", background: d.battery > 50 ? "#10b981" : d.battery > 20 ? "#f59e0b" : "#ef4444" }}></div></div><span>{d.battery}%</span></div><button className={"dc-toggle-btn " + d.status} onClick={function () { toggle(d.id); }}>{d.status === "offline" ? "Connect" : "Disconnect"}</button></div>; })}</div></div>; };
+
+const VitalsMonitorPage = ({ patients }) => { var lvSt = useState([]); var lv = lvSt[0]; var setLv = lvSt[1]; useEffect(function () { var g = function () { return patients.map(function (p) { return { id: p.id, name: p.name, hr: Math.max(40, Math.min(130, parseInt(p.vitals.heartRate || "72", 10) + Math.floor(Math.random() * 11) - 5)), sys: Math.max(80, Math.min(160, parseInt((p.vitals.bp || "120/80").split("/")[0], 10) + Math.floor(Math.random() * 11) - 5)), dia: Math.max(50, Math.min(100, parseInt((p.vitals.bp || "120/80").split("/")[1], 10) + Math.floor(Math.random() * 7) - 3)), temp: Math.max(96, Math.min(104, parseFloat(p.vitals.temp || "98.6") + (Math.random() - 0.5))).toFixed(1), o2: Math.max(88, Math.min(100, parseInt(p.vitals.oxygen || "98", 10) + Math.floor(Math.random() * 5) - 2)), ts: new Date().toLocaleTimeString() }; }); }; setLv(g()); var iv = setInterval(function () { setLv(g()); }, 3000); return function () { clearInterval(iv); }; }, [patients]); var gs = function (t, v) { if (t === "hr") return v > 100 ? "danger" : v < 55 ? "warning" : "normal"; if (t === "bp") return v > 140 ? "danger" : v > 130 ? "warning" : "normal"; if (t === "temp") return v > 100.4 ? "danger" : v > 99.5 ? "warning" : "normal"; if (t === "o2") return v < 93 ? "danger" : v < 95 ? "warning" : "normal"; return "normal"; };
+  return <div className="page-container"><div className="page-hero vitals-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F4A8;</div><div><h1>Live Vitals</h1></div></div></div><div className="vitals-monitor-grid">{lv.map(function (v) { var h = gs("hr", v.hr); var b = gs("bp", v.sys); var tt = gs("temp", parseFloat(v.temp)); var o = gs("o2", v.o2); return <div key={v.id} className="vitals-monitor-card"><div className="vmc-header"><div className="vmc-avatar">{v.name.charAt(0)}</div><div className="vmc-name"><h4>{v.name}</h4><span>{v.ts}</span></div>{(h === "danger" || b === "danger") && <span className="vmc-alert-badge">ALERT</span>}</div><div className="vmc-vitals-grid"><div className={"vmc-vital " + h}><span className="vmc-v-icon">&#x2764;&#xFE0F;</span><span className="vmc-v-value">{v.hr}</span><span className="vmc-v-label">HR</span></div><div className={"vmc-vital " + b}><span className="vmc-v-icon">&#x1FA78;</span><span className="vmc-v-value">{v.sys}/{v.dia}</span><span className="vmc-v-label">BP</span></div><div className={"vmc-vital " + tt}><span className="vmc-v-icon">&#x1F321;&#xFE0F;</span><span className="vmc-v-value">{v.temp}</span><span className="vmc-v-label">Temp</span></div><div className={"vmc-vital " + o}><span className="vmc-v-icon">&#x1F4A7;</span><span className="vmc-v-value">{v.o2}%</span><span className="vmc-v-label">O2</span></div></div></div>; })}</div></div>; };
+
+const ReportsPage = ({ patients }) => { var today = new Date(); var avgAge = patients.length > 0 ? Math.round(patients.reduce(function (s, p) { return s + Number(p.age); }, 0) / patients.length) : 0; var conditions = {}; patients.forEach(function (p) { var c = p.condition || "General"; conditions[c] = (conditions[c] || 0) + 1; }); var sortedCond = Object.entries(conditions).sort(function (a, b) { return b[1] - a[1]; }); var maxC = sortedCond.length > 0 ? sortedCond[0][1] : 1; var ageGroups = { "0-20": 0, "21-40": 0, "41-60": 0, "61+": 0 }; patients.forEach(function (p) { var age = parseInt(p.age, 10); if (age <= 20) ageGroups["0-20"]++; else if (age <= 40) ageGroups["21-40"]++; else if (age <= 60) ageGroups["41-60"]++; else ageGroups["61+"]++; }); var maxAge = Math.max.apply(null, Object.values(ageGroups).concat([1])); var condColors = ["#3b82f6", "#10b981", "#8b5cf6", "#f59e0b", "#ef4444"];
+  var monthlyData = [{ month: "Jan", patients: 12 }, { month: "Feb", patients: 18 }, { month: "Mar", patients: 24 }, { month: "Apr", patients: 15 }, { month: "May", patients: 20 }, { month: "Jun", patients: patients.length }]; var maxMonthly = Math.max.apply(null, monthlyData.map(function (m) { return m.patients; }).concat([1]));
+  return <div className="page-container"><div className="page-hero reports-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F4CA;</div><div><h1>Reports</h1></div></div></div><div className="dash-card" style={{ marginBottom: 24 }}><h3>Daily - {today.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}</h3><div className="stats-grid" style={{ marginBottom: 0 }}><div className="stat-card blue"><div className="stat-icon">&#x1F465;</div><div className="stat-info"><h3>{patients.length}</h3><p>Total</p></div></div><div className="stat-card green"><div className="stat-icon">&#x2642;&#xFE0F;</div><div className="stat-info"><h3>{patients.filter(function (p) { return p.gender === "male"; }).length}</h3><p>Male</p></div></div><div className="stat-card purple"><div className="stat-icon">&#x2640;&#xFE0F;</div><div className="stat-info"><h3>{patients.filter(function (p) { return p.gender === "female"; }).length}</h3><p>Female</p></div></div><div className="stat-card orange"><div className="stat-icon">&#x1F3AF;</div><div className="stat-info"><h3>{avgAge}</h3><p>Avg Age</p></div></div></div></div><div className="dash-card analytics-chart-card" style={{ marginBottom: 24 }}><h3>Monthly</h3><div className="interactive-bars">{monthlyData.map(function (m) { return <div key={m.month} className="ibar-row"><span className="ibar-label">{m.month}</span><div className="ibar-track"><div className="ibar-fill" style={{ width: (m.patients / maxMonthly) * 100 + "%", background: "linear-gradient(90deg, #3b82f6, #60a5fa)" }}><div className="ibar-shine"></div></div></div><span className="ibar-count">{m.patients}</span></div>; })}</div></div><div className="dashboard-grid"><div className="dash-card analytics-chart-card"><h3>Conditions</h3>{sortedCond.length === 0 ? <p className="no-data">No data.</p> : <div className="interactive-bars">{sortedCond.map(function (item, idx) { return <InteractiveBar key={item[0]} label={item[0]} value={item[1]} max={maxC} total={patients.length} color={condColors[idx % condColors.length]} tooltip={{ title: item[0], value: item[1] + " patients" }} />; })}</div>}</div><div className="dash-card analytics-chart-card"><h3>Age</h3><div className="interactive-bars">{Object.entries(ageGroups).map(function (item) { return <InteractiveBar key={item[0]} label={item[0]} value={item[1]} max={maxAge} total={patients.length} color="linear-gradient(90deg, #8b5cf6, #a78bfa)" tooltip={{ title: item[0], value: item[1] + " patients" }} />; })}</div></div></div></div>; };
+
+const NotificationsPage = ({ notifs, setNotifs }) => { var markAll = function () { setNotifs(function (p) { return p.map(function (n) { return Object.assign({}, n, { read: true }); }); }); }; var unread = notifs.filter(function (n) { return !n.read; }).length;
+  return <div className="page-container"><div className="page-hero notif-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F514;</div><div><h1>Notifications</h1></div></div><div className="hero-stats"><div className="hero-stat"><span className="hero-stat-num">{unread}</span><span className="hero-stat-label">Unread</span></div></div></div><div className="notif-toolbar"><button className="next-btn" onClick={markAll}>Mark All Read</button></div><div className="notif-list">{notifs.length === 0 ? <div className="empty-state"><div className="empty-icon">&#x1F514;</div><h3>No notifications</h3></div> : notifs.map(function (n) { return <div key={n.id} className={"notif-item " + (n.read ? "read" : "unread")} onClick={function () { setNotifs(function (p) { return p.map(function (x) { return x.id === n.id ? Object.assign({}, x, { read: true }) : x; }); }); }}><span className="notif-icon">{n.type === "success" ? "\u2705" : n.type === "error" ? "\u274C" : n.type === "warning" ? "\u26A0\uFE0F" : "\u2139\uFE0F"}</span><div className="notif-content"><p>{n.text}</p><span className="notif-time">{n.time}</span></div>{!n.read && <span className="notif-dot"></span>}</div>; })}</div></div>; };
+
+const AnalyticsPage = ({ patients }) => { var total = patients.length; var mc = patients.filter(function (p) { return p.gender === "male"; }).length; var fc = patients.filter(function (p) { return p.gender === "female"; }).length; var avgAge = total > 0 ? Math.round(patients.reduce(function (s, p) { return s + Number(p.age); }, 0) / total) : 0; var conditions = {}; patients.forEach(function (p) { var c = p.condition || "General"; conditions[c] = (conditions[c] || 0) + 1; }); var sortedCond = Object.entries(conditions).sort(function (a, b) { return b[1] - a[1]; }); var maxC = sortedCond.length > 0 ? sortedCond[0][1] : 1; var ageGroups = { "0-20": 0, "21-40": 0, "41-60": 0, "61+": 0 }; patients.forEach(function (p) { var age = parseInt(p.age, 10); if (age <= 20) ageGroups["0-20"]++; else if (age <= 40) ageGroups["21-40"]++; else if (age <= 60) ageGroups["41-60"]++; else ageGroups["61+"]++; }); var maxAge = Math.max.apply(null, Object.values(ageGroups).concat([1])); var hrRanges = { "Low (<60)": 0, "Normal (60-100)": 0, "High (>100)": 0 }; patients.forEach(function (p) { var hr = parseInt(p.vitals.heartRate, 10); if (hr < 60) hrRanges["Low (<60)"]++; else if (hr <= 100) hrRanges["Normal (60-100)"]++; else hrRanges["High (>100)"]++; }); var maxHR = Math.max.apply(null, Object.values(hrRanges).concat([1])); var condColors = ["#3b82f6", "#10b981", "#8b5cf6", "#f59e0b", "#ef4444", "#06b6d4", "#ec4899"];
+  return <div className="page-container"><div className="page-hero analytics-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F4C8;</div><div><h1>Analytics</h1></div></div></div><div className="stats-grid"><div className="stat-card blue"><div className="stat-icon">&#x1F465;</div><div className="stat-info"><h3>{total}</h3><p>Total</p></div></div><div className="stat-card green"><div className="stat-icon">&#x2642;&#xFE0F;</div><div className="stat-info"><h3>{mc}</h3><p>Male</p></div></div><div className="stat-card purple"><div className="stat-icon">&#x2640;&#xFE0F;</div><div className="stat-info"><h3>{fc}</h3><p>Female</p></div></div><div className="stat-card orange"><div className="stat-icon">&#x1F3AF;</div><div className="stat-info"><h3>{avgAge}</h3><p>Avg Age</p></div></div></div><div className="dash-card analytics-chart-card"><h3>&#x1F4CA; Conditions</h3>{sortedCond.length === 0 ? <p className="no-data">No data.</p> : <div className="interactive-bars">{sortedCond.map(function (item, idx) { return <InteractiveBar key={item[0]} label={item[0]} value={item[1]} max={maxC} total={total} color={condColors[idx % condColors.length]} tooltip={{ title: item[0], value: item[1] + " patients", detail: Math.round((item[1] / total) * 100) + "% of total" }} />; })}</div>}</div><div className="dashboard-grid"><div className="dash-card analytics-chart-card"><h3>&#x1F4CA; Gender</h3>{total === 0 ? <p className="no-data">No data.</p> : <div className="analytics-dual"><DonutChart segments={[{ label: "Male", value: mc, color: "#3b82f6" }, { label: "Female", value: fc, color: "#ec4899" }].filter(function (s) { return s.value > 0; })} size={140} thickness={16} /><div className="gender-chart"><div className="gender-bar-container"><div className="gender-bar-label"><span>Male</span><span>{mc} ({Math.round((mc / total) * 100)}%)</span></div><div className="gender-bar-track"><div className="gender-bar male" style={{ width: (mc / total) * 100 + "%" }}></div></div></div><div className="gender-bar-container"><div className="gender-bar-label"><span>Female</span><span>{fc} ({Math.round((fc / total) * 100)}%)</span></div><div className="gender-bar-track"><div className="gender-bar female" style={{ width: (fc / total) * 100 + "%" }}></div></div></div></div></div>}</div><div className="dash-card analytics-chart-card"><h3>&#x1F4CA; Age</h3>{total === 0 ? <p className="no-data">No data.</p> : <div className="interactive-bars">{Object.entries(ageGroups).map(function (item) { return <InteractiveBar key={item[0]} label={item[0]} value={item[1]} max={maxAge} total={total} color="linear-gradient(90deg, #8b5cf6, #a78bfa)" tooltip={{ title: item[0], value: item[1] + " patients", detail: Math.round((item[1] / total) * 100) + "%" }} />; })}</div>}</div></div><div className="dashboard-grid"><div className="dash-card analytics-chart-card"><h3>&#x1F4CA; Heart Rate</h3>{total === 0 ? <p className="no-data">No data.</p> : <div className="interactive-bars">{Object.entries(hrRanges).map(function (item) { var r = item[0]; var c = item[1]; var col = r.indexOf("High") !== -1 ? "linear-gradient(90deg, #ef4444, #f87171)" : r.indexOf("Low") !== -1 ? "linear-gradient(90deg, #f59e0b, #fbbf24)" : "linear-gradient(90deg, #10b981, #34d399)"; return <InteractiveBar key={r} label={r} value={c} max={maxHR} total={total} color={col} tooltip={{ title: "HR: " + r, value: c + " patients" }} />; })}</div>}</div><div className="dash-card"><h3>&#x1F4CB; Recent</h3>{total === 0 ? <p className="no-data">No patients.</p> : <div className="vitals-list">{patients.slice(-5).reverse().map(function (p) { return <div className="vital-row" key={p.id}><span>{p.name} - {p.condition || "General"}</span><span className="vital-val normal">P-{String(p.id).padStart(4, "0")}</span></div>; })}</div>}</div></div></div>; };
+
+const ActivityLogPage = ({ activityLog }) => { return <div className="page-container"><div className="page-hero activity-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F4DD;</div><div><h1>Activity Log</h1></div></div><div className="hero-stats"><div className="hero-stat"><span className="hero-stat-num">{activityLog.length}</span><span className="hero-stat-label">Actions</span></div></div></div><div className="activity-list-full">{activityLog.length === 0 ? <div className="empty-state"><div className="empty-icon">&#x1F4DD;</div><h3>No activity</h3></div> : activityLog.slice().reverse().map(function (log, i) { return <div key={i} className="activity-item-full"><span className={"activity-dot " + log.type}></span><div className="activity-content"><p>{log.text}</p><span>{log.time}</span></div><span className={"activity-type-badge " + log.type}>{log.type}</span></div>; })}</div></div>; };
+
+const ProfilePage = () => { var role = localStorage.getItem("userRole") || "admin"; var name = localStorage.getItem("displayName") || "Admin"; var username = localStorage.getItem("username") || "admin"; var theme = useTheme();
+  return <div className="page-container"><div className="page-hero profile-hero"><div className="hero-content"><div className="hero-icon-box">&#x1F464;</div><div><h1>My Profile</h1></div></div></div><div className="dashboard-grid"><div className="dash-card"><h3>&#x1F464; Account</h3><div className="profile-info"><div className="profile-avatar-big">{name.charAt(0)}</div><div className="profile-details"><div className="pd-item"><span className="pd-label">Name</span><span className="pd-value">{name}</span></div><div className="pd-item"><span className="pd-label">Username</span><span className="pd-value">{username}</span></div><div className="pd-item"><span className="pd-label">Role</span><span className="pd-value">{role}</span></div><div className="pd-item"><span className="pd-label">Status</span><span className="pd-value" style={{ color: "#10b981" }}>Active</span></div></div></div></div><div className="dash-card"><h3>&#x2699;&#xFE0F; Preferences</h3><div className="pref-list"><div className="pref-item"><span>Theme</span><button className="theme-toggle-big" onClick={theme.toggle}>{theme.theme === "dark" ? "\u2600\uFE0F Light" : "\uD83C\uDF19 Dark"}</button></div><div className="pref-item"><span>Notifications</span><span className="pref-status on">Enabled</span></div></div></div></div></div>; };
+
+const AboutPage = () => <div className="page-container">
+  <div className="page-hero about-hero-banner"><div className="hero-content"><div className="hero-icon-box">&#x2139;&#xFE0F;</div><div><h1>About BioMonitor</h1><p>Learn more about this clinical intelligence platform.</p></div></div></div>
+  <div className="about-hero"><div className="about-hero-inner"><div className="about-hero-logo"><span>B</span></div><div className="about-hero-text"><h2>BioMonitor</h2><p>Real-Time Biomedical Patient Monitoring &amp; Analytics Platform</p><span className="version-badge">Version 1.0</span></div></div></div>
+  <div className="about-grid">
+    <div className="about-card"><div className="about-card-icon red">&#x1F3AF;</div><h3>Our Mission</h3><p>To provide healthcare professionals with an intelligent, real-time patient monitoring system that improves clinical decision-making and patient outcomes.</p></div>
+    <div className="about-card"><div className="about-card-icon yellow">&#x26A1;</div><h3>Key Features</h3><p>Real-time vital monitoring, AI-powered anomaly detection, live ECG simulation, advanced analytics with interactive charts and tooltips, automated PDF reports, appointment scheduling, prescription management, medical device monitoring, CSV data export, notification system, activity logging, and an intelligent AI medical assistant powered by Google Gemini.</p></div>
+    <div className="about-card"><div className="about-card-icon purple">&#x1F9E0;</div><h3>AI Technology</h3><p>Powered by Machine Learning (Isolation Forest) for vital anomaly detection and Google Gemini AI for medical assistance, symptom analysis, medical image analysis, and clinical decision support.</p></div>
+    <div className="about-card"><div className="about-card-icon green">&#x1F512;</div><h3>Secure &amp; Reliable</h3><p>Built with JWT authentication, encrypted passwords, and a robust PostgreSQL database to keep patient data safe and secure. Supports multiple user roles (Admin, Doctor, Nurse) with role-based access control.</p></div>
+  </div>
+  <div className="built-with-card"><h3>Built With</h3><div className="tech-tags"><span className="tech-tag">FastAPI</span><span className="tech-tag">React</span><span className="tech-tag">PostgreSQL</span><span className="tech-tag">SQLAlchemy</span><span className="tech-tag">Scikit-Learn</span><span className="tech-tag">Recharts</span><span className="tech-tag">Google Gemini AI</span><span className="tech-tag">JWT Auth</span><span className="tech-tag">ReportLab</span><span className="tech-tag">WebSocket</span></div></div>
+  <div className="developer-card"><div className="dev-avatar">H</div><div className="dev-info"><h3>Developed by Muhammad Hamad Ashraf</h3><p>CS Student | Web Development &amp; Cyber Security Enthusiast</p></div></div>
+</div>;
 
 function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(
-    !!localStorage.getItem("token")
-  );
+  var isLSt = useState(function () { return localStorage.getItem("isLoggedIn") === "true"; }); var isL = isLSt[0]; var setIsL = isLSt[1]; var slSt = useState(true); var sl = slSt[0]; var setSl = slSt[1]; var asSt = useState("dashboard"); var as = asSt[0]; var setAs = asSt[1];
 
-  const [patients, setPatients] = useState([]);
-  const [vitals, setVitals] = useState([]);
-  const [alerts, setAlerts] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  var defaultPatients = [{ id: 1, name: "Ahmed Khan", age: 45, gender: "male", phone: "0301-1234567", email: "ahmed@email.com", condition: "Hypertension", bloodGroup: "B+", emergencyContact: "Ali Khan - 0301-1111111", notes: "On medication since 2022.", date: "Jan 15, 2025", vitals: { heartRate: "78", bp: "140/90", temp: "98.4", oxygen: "97", weight: "82" } }, { id: 2, name: "Fatima Ali", age: 32, gender: "female", phone: "0321-7654321", email: "fatima@email.com", condition: "Diabetes Type 2", bloodGroup: "A+", emergencyContact: "Sara Ali - 0321-2222222", notes: "Managing with insulin.", date: "Feb 3, 2025", vitals: { heartRate: "72", bp: "120/80", temp: "98.6", oxygen: "99", weight: "65" } }, { id: 3, name: "Usman Raza", age: 58, gender: "male", phone: "0333-9876543", email: "usman@email.com", condition: "Cardiac Issue", bloodGroup: "O+", emergencyContact: "Sana Raza - 0333-3333333", notes: "Post bypass.", date: "Mar 10, 2025", vitals: { heartRate: "85", bp: "130/85", temp: "99.1", oxygen: "95", weight: "78" } }];
 
-  const [activeSection, setActiveSection] = useState("dashboard");
-  const [selectedPatient, setSelectedPatient] = useState(null);
-  const [showPatientModal, setShowPatientModal] = useState(false);
+  var _ps = useState(function () { try { var s = localStorage.getItem("bm_v3_patients"); if (s) { var p = JSON.parse(s); if (Array.isArray(p) && p.length > 0) return p; } } catch (e) {} return defaultPatients; }); var patients = _ps[0]; var setPatients = _ps[1]; useEffect(function () { try { localStorage.setItem("bm_v3_patients", JSON.stringify(patients)); } catch (e) {} }, [patients]);
 
-  const [patientForm, setPatientForm] = useState({
-    name: "",
-    age: "",
-    gender: "",
-    medical_condition: "",
-  });
+  var _aS = useState(function () { try { var s = localStorage.getItem("bm_v3_appts"); if (s) { var p = JSON.parse(s); if (Array.isArray(p)) return p; } } catch (e) {} return [{ id: 1, patientId: 1, patient: "Ahmed Khan", doctor: "Dr. Hamad", date: "2025-06-20", time: "10:00 AM", status: "confirmed", reason: "BP follow-up" }]; }); var appts = _aS[0]; var setAppts = _aS[1]; useEffect(function () { try { localStorage.setItem("bm_v3_appts", JSON.stringify(appts)); } catch (e) {} }, [appts]);
 
-  const [vitalForm, setVitalForm] = useState({
-    patient_id: "",
-    heart_rate: "",
-    temperature: "",
-    oxygen_level: "",
-    systolic_bp: "",
-    diastolic_bp: "",
-  });
+  var _rS = useState(function () { try { var s = localStorage.getItem("bm_v3_rx"); if (s) { var p = JSON.parse(s); if (Array.isArray(p)) return p; } } catch (e) {} return [{ id: 1, patientId: 1, patient: "Ahmed Khan", medicine: "Amlodipine 5mg", dosage: "Once daily", duration: "30 days", notes: "After breakfast", date: "Jan 20, 2025" }]; }); var rxList = _rS[0]; var setRxList = _rS[1]; useEffect(function () { try { localStorage.setItem("bm_v3_rx", JSON.stringify(rxList)); } catch (e) {} }, [rxList]);
 
-  const [analyticsPatient, setAnalyticsPatient] = useState("all");
+  var _dS = useState(function () { try { var s = localStorage.getItem("bm_v3_devices"); if (s) { var p = JSON.parse(s); if (Array.isArray(p)) return p; } } catch (e) {} return [{ id: 1, name: "Cardiac Monitor A1", type: "ECG", status: "online", patient: "Ahmed Khan", battery: 87, lastSync: "2 min ago" }, { id: 2, name: "Pulse Oximeter X2", type: "SpO2", status: "online", patient: "Fatima Ali", battery: 92, lastSync: "1 min ago" }, { id: 3, name: "BP Unit", type: "BP", status: "offline", patient: "Usman Raza", battery: 34, lastSync: "5 min ago" }]; }); var devices = _dS[0]; var setDevices = _dS[1]; useEffect(function () { try { localStorage.setItem("bm_v3_devices", JSON.stringify(devices)); } catch (e) {} }, [devices]);
 
-  async function loadData() {
-    try {
-      setError("");
+  var _nS = useState(function () { try { var s = localStorage.getItem("bm_v3_notifs"); if (s) { var p = JSON.parse(s); if (Array.isArray(p)) return p; } } catch (e) {} return [{ id: 1, text: "System initialized", type: "success", time: "Just now", read: false }]; }); var notifs = _nS[0]; var setNotifs = _nS[1]; useEffect(function () { try { localStorage.setItem("bm_v3_notifs", JSON.stringify(notifs)); } catch (e) {} }, [notifs]);
 
-      const [patientsResponse, vitalsResponse] = await Promise.all([
-        fetch(`${API_URL}/patients`),
-        fetch(`${API_URL}/vitals`),
-      ]);
+  var _lS = useState(function () { try { var s = localStorage.getItem("bm_v3_activity"); if (s) { var p = JSON.parse(s); if (Array.isArray(p)) return p; } } catch (e) {} return [{ text: "System initialized", type: "success", time: "Just now" }]; }); var activityLog = _lS[0]; var setActivityLog = _lS[1]; useEffect(function () { try { localStorage.setItem("bm_v3_activity", JSON.stringify(activityLog)); } catch (e) {} }, [activityLog]);
 
-      if (!patientsResponse.ok || !vitalsResponse.ok) {
-        throw new Error("Could not load data from backend.");
-      }
+  var addLog = useCallback(function (text, type) { setActivityLog(function (prev) { return prev.concat([{ text: text, type: type || "info", time: new Date().toLocaleTimeString() }]); }); }, []);
+  var addNotif = useCallback(function (text, type) { setNotifs(function (prev) { return prev.concat([{ id: Date.now() + Math.random(), text: text, type: type || "info", time: new Date().toLocaleTimeString(), read: false }]); }); }, []);
 
-      const patientsData = await patientsResponse.json();
-      const vitalsData = await vitalsResponse.json();
+  useEffect(function () { var t = setTimeout(function () { setSl(false); }, 3000); return function () { clearTimeout(t); }; }, []);
+  var hL = useCallback(function (s) { setIsL(s); }, []);
 
-      setPatients(patientsData);
-      setVitals(vitalsData);
+  // LOGOUT - sirf login data remove, patients safe
+  var hO = function () { localStorage.removeItem("isLoggedIn"); localStorage.removeItem("username"); localStorage.removeItem("userRole"); localStorage.removeItem("displayName"); setIsL(false); setAs("dashboard"); };
 
-      try {
-        const alertsResponse = await fetch(`${API_URL}/alerts`);
+  var ui = { role: localStorage.getItem("userRole") || "admin", name: localStorage.getItem("displayName") || "Admin" };
+  var ta = patients.reduce(function (s, p) { return s + getVitalAlerts(p).length; }, 0);
 
-        if (alertsResponse.ok) {
-          const alertsData = await alertsResponse.json();
+  var nav = [["dashboard", "\uD83C\uDFE5", "Dashboard"], ["patients", "\uD83D\uDC65", "Patients"], ["records", "\u2795", "Add Records"], ["vitals", "\uD83D\uDC93", "Vitals Live"], ["ecg", "\u2764\uFE0F", "ECG"], ["devices", "\uD83D\uDCBB", "Devices"], ["appointments", "\uD83D\uDCC5", "Appointments"], ["prescriptions", "\uD83D\uDC8A", "Prescriptions"], ["analytics", "\uD83D\uDCC8", "Analytics"], ["reports", "\uD83D\uDCCA", "Reports"], ["notifications", "\uD83D\uDD14", "Notifications"], ["activity", "\uD83D\uDDDD", "Activity Log"], ["ai", "\uD83E\uDD16", "AI Assistant"], ["profile", "\uD83D\uDC64", "Profile"], ["about", "\u2139\uFE0F", "About"]];
 
-          if (Array.isArray(alertsData)) {
-            setAlerts(alertsData);
-          } else if (Array.isArray(alertsData.alerts)) {
-            setAlerts(alertsData.alerts);
-          } else {
-            setAlerts([]);
-          }
-        } else {
-          setAlerts([]);
-        }
-      } catch {
-        setAlerts([]);
-      }
-    } catch (err) {
-      setError(
-        "Backend se connection nahi ho raha. Make sure FastAPI port 8001 par running hai."
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
+  var rS = function () { switch (as) { case "dashboard": return <DashboardPage patients={patients} onNavigate={setAs} />; case "patients": return <PatientsPage patients={patients} setPatients={setPatients} addLog={addLog} addNotif={addNotif} />; case "records": return <AddRecordsPage patients={patients} setPatients={setPatients} addLog={addLog} addNotif={addNotif} />; case "vitals": return <VitalsMonitorPage patients={patients} />; case "ecg": return <ECGPage patients={patients} />; case "devices": return <DevicesPage devices={devices} setDevices={setDevices} />; case "appointments": return <AppointmentsPage patients={patients} appts={appts} setAppts={setAppts} addLog={addLog} addNotif={addNotif} />; case "prescriptions": return <PrescriptionPage patients={patients} rxList={rxList} setRxList={setRxList} addLog={addLog} addNotif={addNotif} />; case "analytics": return <AnalyticsPage patients={patients} />; case "reports": return <ReportsPage patients={patients} />; case "notifications": return <NotificationsPage notifs={notifs} setNotifs={setNotifs} />; case "activity": return <ActivityLogPage activityLog={activityLog} />; case "ai": return <AiAssistant />; case "profile": return <ProfilePage />; case "about": return <AboutPage />; default: return <DashboardPage patients={patients} onNavigate={setAs} />; } };
 
-  useEffect(() => {
-    if (!isLoggedIn) return;
+  if (sl) return <LoadingScreen />;
+  if (!isL) return <ThemeProvider><ToastProvider><Login onLogin={hL} /></ToastProvider></ThemeProvider>;
 
-    loadData();
-
-    const interval = setInterval(() => {
-      loadData();
-    }, 10000);
-
-    return () => clearInterval(interval);
-  }, [isLoggedIn]);
-
-  async function handleAddPatient(e) {
-    e.preventDefault();
-
-    try {
-      setError("");
-
-      const response = await fetch(`${API_URL}/patients`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          name: patientForm.name,
-          age: Number(patientForm.age),
-          gender: patientForm.gender,
-          medical_condition: patientForm.medical_condition || null,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to add patient");
-      }
-
-      setPatientForm({
-        name: "",
-        age: "",
-        gender: "",
-        medical_condition: "",
-      });
-
-      await loadData();
-      setActiveSection("patients");
-    } catch (err) {
-      setError("Patient add nahi ho saka.");
-    }
-  }
-
-  async function handleAddVital(e) {
-    e.preventDefault();
-
-    try {
-      setError("");
-
-      const response = await fetch(`${API_URL}/vitals`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          patient_id: Number(vitalForm.patient_id),
-          heart_rate:
-            vitalForm.heart_rate === ""
-              ? null
-              : Number(vitalForm.heart_rate),
-          temperature:
-            vitalForm.temperature === ""
-              ? null
-              : Number(vitalForm.temperature),
-          oxygen_level:
-            vitalForm.oxygen_level === ""
-              ? null
-              : Number(vitalForm.oxygen_level),
-          systolic_bp:
-            vitalForm.systolic_bp === ""
-              ? null
-              : Number(vitalForm.systolic_bp),
-          diastolic_bp:
-            vitalForm.diastolic_bp === ""
-              ? null
-              : Number(vitalForm.diastolic_bp),
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to add vital");
-      }
-
-      setVitalForm({
-        patient_id: "",
-        heart_rate: "",
-        temperature: "",
-        oxygen_level: "",
-        systolic_bp: "",
-        diastolic_bp: "",
-      });
-
-      await loadData();
-      setActiveSection("dashboard");
-    } catch (err) {
-      setError("Vital record add nahi ho saka.");
-    }
-  }
-
-  function handleLogout() {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    setIsLoggedIn(false);
-  }
-
-  function handleDownloadReport(patientId) {
-    window.open(`${API_URL}/report/patient/${patientId}`, "_blank");
-  }
-
-  function getPatientName(patientId) {
-    const patient = patients.find((p) => p.id === patientId);
-    return patient ? patient.name : `Patient #${patientId}`;
-  }
-
-  function getPatientVitals(patientId) {
-    return vitals
-      .filter((v) => v.patient_id === patientId)
-      .sort(
-        (a, b) =>
-          new Date(a.recorded_at || 0) -
-          new Date(b.recorded_at || 0)
-      );
-  }
-
-  const latestVitals = useMemo(() => {
-    const latest = {};
-
-    vitals.forEach((vital) => {
-      const current = latest[vital.patient_id];
-
-      if (
-        !current ||
-        new Date(vital.recorded_at || 0) >
-          new Date(current.recorded_at || 0)
-      ) {
-        latest[vital.patient_id] = vital;
-      }
-    });
-
-    return latest;
-  }, [vitals]);
-
-  const averageHeartRate = useMemo(() => {
-    const values = vitals
-      .map((v) => v.heart_rate)
-      .filter((v) => typeof v === "number");
-
-    if (!values.length) return "--";
-
-    return (
-      values.reduce((sum, value) => sum + value, 0) / values.length
-    ).toFixed(1);
-  }, [vitals]);
-
-  const averageTemperature = useMemo(() => {
-    const values = vitals
-      .map((v) => v.temperature)
-      .filter((v) => typeof v === "number");
-
-    if (!values.length) return "--";
-
-    return (
-      values.reduce((sum, value) => sum + value, 0) / values.length
-    ).toFixed(1);
-  }, [vitals]);
-
-  const averageOxygen = useMemo(() => {
-    const values = vitals
-      .map((v) => v.oxygen_level)
-      .filter((v) => typeof v === "number");
-
-    if (!values.length) return "--";
-
-    return (
-      values.reduce((sum, value) => sum + value, 0) / values.length
-    ).toFixed(1);
-  }, [vitals]);
-
-  const analyticsVitals = useMemo(() => {
-    let filtered = vitals;
-
-    if (analyticsPatient !== "all") {
-      filtered = vitals.filter(
-        (v) => String(v.patient_id) === String(analyticsPatient)
-      );
-    }
-
-    return [...filtered]
-      .sort(
-        (a, b) =>
-          new Date(a.recorded_at || 0) -
-          new Date(b.recorded_at || 0)
-      )
-      .map((vital, index) => ({
-        ...vital,
-        point: index + 1,
-        time: vital.recorded_at
-          ? new Date(vital.recorded_at).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })
-          : `#${index + 1}`,
-        patient: getPatientName(vital.patient_id),
-      }));
-  }, [vitals, analyticsPatient, patients]);
-
-  const selectedAnalyticsPatient =
-    analyticsPatient === "all"
-      ? null
-      : patients.find(
-          (patient) =>
-            String(patient.id) === String(analyticsPatient)
-        );
-
-  function openPatientHistory(patient) {
-    setSelectedPatient(patient);
-    setShowPatientModal(true);
-  }
-
-  function closePatientHistory() {
-    setShowPatientModal(false);
-    setSelectedPatient(null);
-  }
-
-  function renderDashboard() {
-    return (
-      <>
-        <div className="page-heading">
-          <div>
-            <p className="eyebrow">LIVE MONITORING</p>
-            <h1>Patient Dashboard</h1>
-            <p>Real-time biomedical patient monitoring and analytics.</p>
-          </div>
-
-          <button className="refresh-btn" onClick={loadData}>
-            ↻ Refresh
-          </button>
-        </div>
-
-        {error && <div className="error-box">{error}</div>}
-
-        <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-icon">👥</div>
-            <div>
-              <span>Total Patients</span>
-              <strong>{patients.length}</strong>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-icon">❤️</div>
-            <div>
-              <span>Avg Heart Rate</span>
-              <strong>
-                {averageHeartRate}
-                {averageHeartRate !== "--" && " bpm"}
-              </strong>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-icon">🌡️</div>
-            <div>
-              <span>Avg Temperature</span>
-              <strong>
-                {averageTemperature}
-                {averageTemperature !== "--" && " °C"}
-              </strong>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-icon">🫁</div>
-            <div>
-              <span>Avg Oxygen</span>
-              <strong>
-                {averageOxygen}
-                {averageOxygen !== "--" && "%"}
-              </strong>
-            </div>
-          </div>
-        </div>
-
-        <section className="section-block">
-          <div className="section-title-row">
-            <div>
-              <p className="eyebrow">ALERT CENTER</p>
-              <h2>Patient Alerts</h2>
-            </div>
-            <span className="count-badge">{alerts.length}</span>
-          </div>
-
-          {alerts.length === 0 ? (
-            <div className="no-alerts">
-              <span>✓</span>
-              <div>
-                <strong>No active alerts</strong>
-                <p>
-                  Current patient records do not contain any active
-                  alerts.
-                </p>
-              </div>
-            </div>
-          ) : (
-            <div className="alerts-list">
-              {alerts.map((alert, index) => (
-                <div className="alert-card" key={index}>
-                  <div className="alert-symbol">!</div>
-                  <div>
-                    <strong>
-                      {alert.patient_name ||
-                        getPatientName(alert.patient_id)}
-                    </strong>
-                    <p>
-                      {alert.severity && (
-                        <span className={`severity-tag ${alert.severity?.toLowerCase()}`}>
-                          {alert.severity}
-                        </span>
-                      )}{" "}
-                      {alert.issues && alert.issues.length > 0
-                        ? alert.issues.map((i) => i.message).join(", ")
-                        : alert.message ||
-                          "Patient vital requires attention."}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="section-block">
-          <div className="section-title-row">
-            <div>
-              <p className="eyebrow">PATIENTS</p>
-              <h2>Active Patients</h2>
-            </div>
-            <button
-              className="small-btn"
-              onClick={() => setActiveSection("patients")}
-            >
-              View All
-            </button>
-          </div>
-
-          {patients.length === 0 ? (
-            <div className="empty-state">
-              No patients found. Add your first patient.
-            </div>
-          ) : (
-            <div className="patients-grid">
-              {patients.map((patient) => {
-                const vital = latestVitals[patient.id];
-
-                return (
-                  <div className="patient-card" key={patient.id}>
-                    <div className="patient-card-top">
-                      <div className="avatar">
-                        {patient.name?.charAt(0)?.toUpperCase() || "P"}
-                      </div>
-
-                      <div>
-                        <h3>{patient.name}</h3>
-                        <p>
-                          ID #{patient.id} · {patient.gender} ·{" "}
-                          {patient.age} years
-                        </p>
-                      </div>
-
-                      <span className="status-dot">LIVE</span>
-                    </div>
-
-                    <div className="patient-condition">
-                      {patient.medical_condition ||
-                        "No medical condition specified"}
-                    </div>
-
-                    <div className="vitals-row">
-                      <div>
-                        <span>HR</span>
-                        <strong>
-                          {vital?.heart_rate ?? "--"}
-                          {vital?.heart_rate != null && " bpm"}
-                        </strong>
-                      </div>
-
-                      <div>
-                        <span>Temp</span>
-                        <strong>
-                          {vital?.temperature ?? "--"}
-                          {vital?.temperature != null && " °C"}
-                        </strong>
-                      </div>
-
-                      <div>
-                        <span>SpO₂</span>
-                        <strong>
-                          {vital?.oxygen_level ?? "--"}
-                          {vital?.oxygen_level != null && "%"}
-                        </strong>
-                      </div>
-                    </div>
-
-                    <button
-                      className="history-btn"
-                      onClick={() => openPatientHistory(patient)}
-                    >
-                      View History →
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-      </>
-    );
-  }
-
-  function renderPatients() {
-    return (
-      <>
-        <div className="page-heading">
-          <div>
-            <p className="eyebrow">PATIENT MANAGEMENT</p>
-            <h1>Patients</h1>
-            <p>Manage registered patients and their latest vitals.</p>
-          </div>
-        </div>
-
-        <div className="patients-grid">
-          {patients.map((patient) => {
-            const vital = latestVitals[patient.id];
-
-            return (
-              <div className="patient-card" key={patient.id}>
-                <div className="patient-card-top">
-                  <div className="avatar">
-                    {patient.name?.charAt(0)?.toUpperCase() || "P"}
-                  </div>
-
-                  <div>
-                    <h3>{patient.name}</h3>
-                    <p>
-                      Patient #{patient.id} · {patient.gender}
-                    </p>
-                  </div>
-
-                  <span className="status-dot">LIVE</span>
-                </div>
-
-                <div className="patient-info">
-                  <span>
-                    <b>Age:</b> {patient.age}
-                  </span>
-                  <span>
-                    <b>Condition:</b>{" "}
-                    {patient.medical_condition || "Not specified"}
-                  </span>
-                </div>
-
-                <div className="vitals-row">
-                  <div>
-                    <span>HR</span>
-                    <strong>{vital?.heart_rate ?? "--"}</strong>
-                  </div>
-                  <div>
-                    <span>SpO₂</span>
-                    <strong>
-                      {vital?.oxygen_level != null
-                        ? `${vital.oxygen_level}%`
-                        : "--"}
-                    </strong>
-                  </div>
-                  <div>
-                    <span>BP</span>
-                    <strong>
-                      {vital?.systolic_bp != null &&
-                      vital?.diastolic_bp != null
-                        ? `${vital.systolic_bp}/${vital.diastolic_bp}`
-                        : "--"}
-                    </strong>
-                  </div>
-                </div>
-
-                <button
-                  className="history-btn"
-                  onClick={() => openPatientHistory(patient)}
-                >
-                  View Patient History →
-                </button>
-
-                <button
-                  className="pdf-btn"
-                  onClick={() => handleDownloadReport(patient.id)}
-                >
-                  📄 Download PDF Report
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </>
-    );
-  }
-
-  function renderForms() {
-    return (
-      <>
-        <div className="page-heading">
-          <div>
-            <p className="eyebrow">DATA ENTRY</p>
-            <h1>Add Records</h1>
-            <p>Add patients and record their biomedical vital signs.</p>
-          </div>
-        </div>
-
-        <div className="forms-section">
-          <form className="form-card" onSubmit={handleAddPatient}>
-            <div className="form-card-heading">
-              <span>01</span>
-              <div>
-                <h2>Add Patient</h2>
-                <p>Create a new patient record.</p>
-              </div>
-            </div>
-
-            <label>Patient Name</label>
-            <input
-              type="text"
-              placeholder="e.g. Ali Ahmed"
-              value={patientForm.name}
-              onChange={(e) =>
-                setPatientForm({
-                  ...patientForm,
-                  name: e.target.value,
-                })
-              }
-              required
-            />
-
-            <label>Age</label>
-            <input
-              type="number"
-              placeholder="e.g. 35"
-              value={patientForm.age}
-              onChange={(e) =>
-                setPatientForm({
-                  ...patientForm,
-                  age: e.target.value,
-                })
-              }
-              required
-            />
-
-            <label>Gender</label>
-            <select
-              value={patientForm.gender}
-              onChange={(e) =>
-                setPatientForm({
-                  ...patientForm,
-                  gender: e.target.value,
-                })
-              }
-              required
-            >
-              <option value="">Select gender</option>
-              <option value="Male">Male</option>
-              <option value="Female">Female</option>
-              <option value="Other">Other</option>
-            </select>
-
-            <label>Medical Condition</label>
-            <input
-              type="text"
-              placeholder="e.g. Hypertension"
-              value={patientForm.medical_condition}
-              onChange={(e) =>
-                setPatientForm({
-                  ...patientForm,
-                  medical_condition: e.target.value,
-                })
-              }
-            />
-
-            <button className="submit-btn" type="submit">
-              + Add Patient
-            </button>
-          </form>
-
-          <form className="form-card" onSubmit={handleAddVital}>
-            <div className="form-card-heading">
-              <span>02</span>
-              <div>
-                <h2>Record Vitals</h2>
-                <p>Enter the latest patient measurements.</p>
-              </div>
-            </div>
-
-            <label>Patient</label>
-            <select
-              value={vitalForm.patient_id}
-              onChange={(e) =>
-                setVitalForm({
-                  ...vitalForm,
-                  patient_id: e.target.value,
-                })
-              }
-              required
-            >
-              <option value="">Select patient</option>
-              {patients.map((patient) => (
-                <option key={patient.id} value={patient.id}>
-                  #{patient.id} — {patient.name}
-                </option>
-              ))}
-            </select>
-
-            <label>Heart Rate (bpm)</label>
-            <input
-              type="number"
-              step="0.1"
-              placeholder="e.g. 78"
-              value={vitalForm.heart_rate}
-              onChange={(e) =>
-                setVitalForm({
-                  ...vitalForm,
-                  heart_rate: e.target.value,
-                })
-              }
-            />
-
-            <label>Temperature (°C)</label>
-            <input
-              type="number"
-              step="0.1"
-              placeholder="e.g. 36.8"
-              value={vitalForm.temperature}
-              onChange={(e) =>
-                setVitalForm({
-                  ...vitalForm,
-                  temperature: e.target.value,
-                })
-              }
-            />
-
-            <label>Oxygen Level (%)</label>
-            <input
-              type="number"
-              step="0.1"
-              placeholder="e.g. 98"
-              value={vitalForm.oxygen_level}
-              onChange={(e) =>
-                setVitalForm({
-                  ...vitalForm,
-                  oxygen_level: e.target.value,
-                })
-              }
-            />
-
-            <div className="two-inputs">
-              <div>
-                <label>Systolic BP</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  placeholder="120"
-                  value={vitalForm.systolic_bp}
-                  onChange={(e) =>
-                    setVitalForm({
-                      ...vitalForm,
-                      systolic_bp: e.target.value,
-                    })
-                  }
-                />
-              </div>
-
-              <div>
-                <label>Diastolic BP</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  placeholder="80"
-                  value={vitalForm.diastolic_bp}
-                  onChange={(e) =>
-                    setVitalForm({
-                      ...vitalForm,
-                      diastolic_bp: e.target.value,
-                    })
-                  }
-                />
-              </div>
-            </div>
-
-            <button className="submit-btn" type="submit">
-              + Record Vitals
-            </button>
-          </form>
-        </div>
-      </>
-    );
-  }
-
-  function renderAnalytics() {
-    const chartData = analyticsVitals;
-
-    return (
-      <>
-        <div className="page-heading">
-          <div>
-            <p className="eyebrow">BIOMEDICAL ANALYTICS</p>
-            <h1>Analytics</h1>
-            <p>
-              Visual analysis of patient vital signs over time.
-            </p>
-          </div>
-        </div>
-
-        <div className="analytics-filter">
-          <label>Analyze Patient</label>
-          <select
-            value={analyticsPatient}
-            onChange={(e) => setAnalyticsPatient(e.target.value)}
-          >
-            <option value="all">All Patients</option>
-
-            {patients.map((patient) => (
-              <option key={patient.id} value={patient.id}>
-                #{patient.id} — {patient.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {selectedAnalyticsPatient && (
-          <div className="analytics-patient-banner">
-            <div className="avatar">
-              {selectedAnalyticsPatient.name
-                ?.charAt(0)
-                ?.toUpperCase()}
-            </div>
-
-            <div>
-              <strong>{selectedAnalyticsPatient.name}</strong>
-              <span>
-                Patient #{selectedAnalyticsPatient.id} ·{" "}
-                {selectedAnalyticsPatient.age} years ·{" "}
-                {selectedAnalyticsPatient.gender}
-              </span>
-            </div>
-          </div>
-        )}
-
-        <div className="analytics-summary">
-          <div>
-            <span>Records</span>
-            <strong>{chartData.length}</strong>
-          </div>
-
-          <div>
-            <span>Avg HR</span>
-            <strong>
-              {chartData.length
-                ? (
-                    chartData
-                      .filter((v) => v.heart_rate != null)
-                      .reduce((sum, v) => sum + v.heart_rate, 0) /
-                    Math.max(
-                      chartData.filter((v) => v.heart_rate != null)
-                        .length,
-                      1
-                    )
-                  ).toFixed(1)
-                : "--"}
-            </strong>
-          </div>
-
-          <div>
-            <span>Avg SpO₂</span>
-            <strong>
-              {chartData.length
-                ? (
-                    chartData
-                      .filter((v) => v.oxygen_level != null)
-                      .reduce(
-                        (sum, v) => sum + v.oxygen_level,
-                        0
-                      ) /
-                    Math.max(
-                      chartData.filter(
-                        (v) => v.oxygen_level != null
-                      ).length,
-                      1
-                    )
-                  ).toFixed(1)
-                : "--"}
-            </strong>
-          </div>
-
-          <div>
-            <span>Avg Systolic</span>
-            <strong>
-              {chartData.length
-                ? (
-                    chartData
-                      .filter((v) => v.systolic_bp != null)
-                      .reduce((sum, v) => sum + v.systolic_bp, 0) /
-                    Math.max(
-                      chartData.filter(
-                        (v) => v.systolic_bp != null
-                      ).length,
-                      1
-                    )
-                  ).toFixed(1)
-                : "--"}
-            </strong>
-          </div>
-        </div>
-
-        {chartData.length === 0 ? (
-          <div className="empty-state">
-            No vital records available for this selection.
-          </div>
-        ) : (
-          <div className="charts-grid">
-            <div className="chart-card">
-              <div className="chart-heading">
-                <div>
-                  <p className="eyebrow">CARDIAC</p>
-                  <h2>Heart Rate Trend</h2>
-                </div>
-                <span>bpm</span>
-              </div>
-
-              <div className="chart-container-fixed">
-                <LineChart
-                  width={650}
-                  height={300}
-                  data={chartData}
-                  margin={{
-                    top: 10,
-                    right: 25,
-                    left: 0,
-                    bottom: 10,
-                  }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="time" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="heart_rate"
-                    name="Heart Rate"
-                    stroke="#ef4444"
-                    strokeWidth={3}
-                    dot={{ r: 4 }}
-                    connectNulls
-                  />
-                </LineChart>
-              </div>
-            </div>
-
-            <div className="chart-card">
-              <div className="chart-heading">
-                <div>
-                  <p className="eyebrow">THERMAL</p>
-                  <h2>Temperature Trend</h2>
-                </div>
-                <span>°C</span>
-              </div>
-
-              <div className="chart-container-fixed">
-                <LineChart
-                  width={650}
-                  height={300}
-                  data={chartData}
-                  margin={{
-                    top: 10,
-                    right: 25,
-                    left: 0,
-                    bottom: 10,
-                  }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="time" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="temperature"
-                    name="Temperature"
-                    stroke="#f59e0b"
-                    strokeWidth={3}
-                    dot={{ r: 4 }}
-                    connectNulls
-                  />
-                </LineChart>
-              </div>
-            </div>
-
-            <div className="chart-card">
-              <div className="chart-heading">
-                <div>
-                  <p className="eyebrow">RESPIRATORY</p>
-                  <h2>Oxygen Saturation</h2>
-                </div>
-                <span>%</span>
-              </div>
-
-              <div className="chart-container-fixed">
-                <LineChart
-                  width={650}
-                  height={300}
-                  data={chartData}
-                  margin={{
-                    top: 10,
-                    right: 25,
-                    left: 0,
-                    bottom: 10,
-                  }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="time" />
-                  <YAxis domain={["auto", "auto"]} />
-                  <Tooltip />
-                  <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="oxygen_level"
-                    name="Oxygen Saturation"
-                    stroke="#0ea5e9"
-                    strokeWidth={3}
-                    dot={{ r: 4 }}
-                    connectNulls
-                  />
-                </LineChart>
-              </div>
-            </div>
-
-            <div className="chart-card">
-              <div className="chart-heading">
-                <div>
-                  <p className="eyebrow">HEMODYNAMIC</p>
-                  <h2>Blood Pressure Trend</h2>
-                </div>
-                <span>mmHg</span>
-              </div>
-
-              <div className="chart-container-fixed">
-                <LineChart
-                  width={650}
-                  height={300}
-                  data={chartData}
-                  margin={{
-                    top: 10,
-                    right: 25,
-                    left: 0,
-                    bottom: 10,
-                  }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="time" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-
-                  <Line
-                    type="monotone"
-                    dataKey="systolic_bp"
-                    name="Systolic"
-                    stroke="#8b5cf6"
-                    strokeWidth={3}
-                    dot={{ r: 4 }}
-                    connectNulls
-                  />
-
-                  <Line
-                    type="monotone"
-                    dataKey="diastolic_bp"
-                    name="Diastolic"
-                    stroke="#14b8a6"
-                    strokeWidth={3}
-                    dot={{ r: 4 }}
-                    connectNulls
-                  />
-                </LineChart>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div className="analytics-insight">
-          <div className="insight-icon">✦</div>
-          <div>
-            <strong>Monitoring Insight</strong>
-            <p>
-              BioMonitor continuously collects patient vital records
-              and presents them visually so changes in heart rate,
-              temperature, oxygen saturation, and blood pressure can
-              be monitored more easily.
-            </p>
-          </div>
-        </div>
-      </>
-    );
-  }
-
-  function renderHistoryModal() {
-    if (!showPatientModal || !selectedPatient) return null;
-
-    const patientVitals = getPatientVitals(selectedPatient.id);
-
-    return (
-      <div className="modal-overlay" onClick={closePatientHistory}>
-        <div
-          className="patient-modal"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="modal-header">
-            <div>
-              <p className="eyebrow">PATIENT HISTORY</p>
-              <h2>{selectedPatient.name}</h2>
-              <p>
-                #{selectedPatient.id} · {selectedPatient.age} years ·{" "}
-                {selectedPatient.gender}
-              </p>
-            </div>
-
-            <button
-              className="close-btn"
-              onClick={closePatientHistory}
-            >
-              ×
-            </button>
-          </div>
-
-          <div className="modal-condition">
-            <strong>Medical Condition</strong>
-            <span>
-              {selectedPatient.medical_condition ||
-                "Not specified"}
-            </span>
-          </div>
-
-          {patientVitals.length === 0 ? (
-            <div className="empty-state">
-              No vital history available.
-            </div>
-          ) : (
-            <div className="history-table-wrapper">
-              <table className="history-table">
-                <thead>
-                  <tr>
-                    <th>Date & Time</th>
-                    <th>Heart Rate</th>
-                    <th>Temperature</th>
-                    <th>SpO₂</th>
-                    <th>Blood Pressure</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {patientVitals.map((vital) => (
-                    <tr key={vital.id}>
-                      <td>
-                        {vital.recorded_at
-                          ? new Date(
-                              vital.recorded_at
-                            ).toLocaleString()
-                          : "--"}
-                      </td>
-
-                      <td>
-                        {vital.heart_rate != null
-                          ? `${vital.heart_rate} bpm`
-                          : "--"}
-                      </td>
-
-                      <td>
-                        {vital.temperature != null
-                          ? `${vital.temperature} °C`
-                          : "--"}
-                      </td>
-
-                      <td>
-                        {vital.oxygen_level != null
-                          ? `${vital.oxygen_level}%`
-                          : "--"}
-                      </td>
-
-                      <td>
-                        {vital.systolic_bp != null &&
-                        vital.diastolic_bp != null
-                          ? `${vital.systolic_bp}/${vital.diastolic_bp} mmHg`
-                          : "--"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ============= LOGIN CHECK =============
-  if (!isLoggedIn) {
-    return <Login onLogin={() => setIsLoggedIn(true)} />;
-  }
-
-  if (loading) {
-    return (
-      <div className="loading-screen">
-        <div className="loading-spinner"></div>
-        <h2>BioMonitor</h2>
-        <p>Loading patient monitoring system...</p>
-      </div>
-    );
-  }
-
-  return (
+  return <ThemeProvider><ToastProvider>
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">B</div>
-          <div>
-            <h2>BioMonitor</h2>
-            <span>Clinical Intelligence</span>
-          </div>
-        </div>
-
-        <div className="sidebar-status">
-          <span className="live-dot"></span>
-          System Online
-        </div>
-
-        <nav className="navigation">
-          <button
-            className={
-              activeSection === "dashboard" ? "nav-item active" : "nav-item"
-            }
-            onClick={() => setActiveSection("dashboard")}
-          >
-            <span>⌂</span>
-            Dashboard
-          </button>
-
-          <button
-            className={
-              activeSection === "patients" ? "nav-item active" : "nav-item"
-            }
-            onClick={() => setActiveSection("patients")}
-          >
-            <span>♙</span>
-            Patients
-          </button>
-
-          <button
-            className={
-              activeSection === "forms" ? "nav-item active" : "nav-item"
-            }
-            onClick={() => setActiveSection("forms")}
-          >
-            <span>＋</span>
-            Add Records
-          </button>
-
-          <button
-            className={
-              activeSection === "analytics" ? "nav-item active" : "nav-item"
-            }
-            onClick={() => setActiveSection("analytics")}
-          >
-            <span>⌁</span>
-            Analytics
-          </button>
-        </nav>
-
-        <div className="sidebar-bottom">
-          <div className="system-card">
-            <span>API STATUS</span>
-            <strong>
-              <i></i> Connected
-            </strong>
-            <small>127.0.0.1:8001</small>
-          </div>
-
-          <button className="logout-btn" onClick={handleLogout}>
-            ⎋ Logout
-          </button>
-        </div>
+        <div className="sidebar-header"><div className="logo-small">B</div><div><h2>BioMonitor</h2><p>{ui.role}</p></div></div>
+        <div className="system-status"><span className="status-dot online"></span><span>System Online</span></div>
+        <nav className="sidebar-nav">{nav.map(function (item) { return <a key={item[0]} href={"#" + item[0]} className={"nav-item" + (as === item[0] ? " active" : "")} onClick={function (e) { e.preventDefault(); setAs(item[0]); }}><span>{item[1]}</span><span>{item[2]}</span></a>; })}</nav>
+        {ta > 0 && <div className="sidebar-alert-badge">&#x1F534; {ta} Alert{ta > 1 ? "s" : ""}</div>}
+        <div className="api-status"><p className="api-label">API STATUS</p><p className="api-connected"><span className="status-dot online"></span> Connected</p></div>
+        <button className="logout-btn" onClick={hO}>&#x1F6AA; Logout</button>
       </aside>
-
-      <main className="main-content">
-        <header className="topbar">
-          <div>
-            <span className="topbar-label">BIOMEDICAL MONITORING PLATFORM</span>
-          </div>
-
-          <div className="topbar-time">
-            <span>● LIVE</span>
-            <span>{new Date().toLocaleDateString()}</span>
-          </div>
-        </header>
-
-        {activeSection === "dashboard" && renderDashboard()}
-        {activeSection === "patients" && renderPatients()}
-        {activeSection === "forms" && renderForms()}
-        {activeSection === "analytics" && renderAnalytics()}
-
-        <footer className="footer">
-          <span>BioMonitor</span>
-          <span>Real-Time Biomedical Patient Monitoring & Analytics Platform</span>
-          <span>v1.0</span>
-        </footer>
-      </main>
-
-      {renderHistoryModal()}
+      <main className="main-content"><LiveTimeBar user={ui} />{rS()}</main>
     </div>
-  );
+  </ToastProvider></ThemeProvider>;
 }
 
 export default App;
