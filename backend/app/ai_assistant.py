@@ -1,9 +1,13 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()
+import google.generativeai as genai
 # ai_assistant.py
 import os
 import google.generativeai as genai
 
 # ⚠️ Apni Gemini API key yahan daalo
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6Lc-Fx93hHNOAG1u-rxuB08Wfj51RCE5TrseVoRaypgaA")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
