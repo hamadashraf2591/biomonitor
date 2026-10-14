@@ -1,12 +1,10 @@
 fastapi
 uvicorn[standard]
 sqlalchemy
-psycopg2-binary
 pymysql
 cryptography
 reportlab
 python-jose[cryptography]
 bcrypt
 python-multipart
-google-generativeai
 python-dotenv
