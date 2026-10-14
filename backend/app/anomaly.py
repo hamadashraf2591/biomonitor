@@ -1,5 +1,12 @@
-import numpy as np
-from sklearn.ensemble import IsolationForest
+# anomaly.py
+# ML optional hai — agar sklearn na ho to sirf rule-based chalega
+
+try:
+    import numpy as np
+    from sklearn.ensemble import IsolationForest
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
 
 NORMAL_RANGES = {
     "heart_rate":   (60, 100),
@@ -54,6 +61,8 @@ def rule_based_check(vital):
 
 
 def ml_detect_anomalies(vitals_list):
+    if not ML_AVAILABLE:
+        return {}
     if len(vitals_list) < 5:
         return {}
 
@@ -70,17 +79,8 @@ def ml_detect_anomalies(vitals_list):
         ids.append(v.id)
 
     X = np.array(data)
-
-    model = IsolationForest(
-        contamination=0.15,
-        random_state=42,
-        n_estimators=100
-    )
+    model = IsolationForest(contamination=0.15, random_state=42, n_estimators=100)
     model.fit(X)
     predictions = model.predict(X)
 
-    result = {}
-    for vid, pred in zip(ids, predictions):
-        result[vid] = (pred == -1)
-
-    return result
+    return {vid: (pred == -1) for vid, pred in zip(ids, predictions)}
