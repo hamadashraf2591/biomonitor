@@ -10,3 +10,5 @@ bcrypt
 python-multipart
 google-generativeai
 python-dotenv
+pymysql
+cryptography
